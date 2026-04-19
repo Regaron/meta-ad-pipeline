@@ -1,4 +1,5 @@
 import os
+import select
 import socket
 import subprocess
 import time
@@ -35,6 +36,18 @@ def test_chainlit_boot(live_settings):
     try:
         deadline = time.time() + 10
         while time.time() < deadline:
+            if process.stdout is None:
+                break
+
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            ready_fds, _, _ = select.select([process.stdout], [], [], min(0.2, remaining))
+            if not ready_fds:
+                if process.poll() is not None:
+                    break
+                continue
+
             line = process.stdout.readline()
             if line:
                 lines.append(line.rstrip())

@@ -60,12 +60,16 @@ def _claude_auth_available() -> bool:
     if shutil.which("claude") is None:
         return False
 
-    result = subprocess.run(
-        ["claude", "auth", "status", "--json"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["claude", "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     if result.returncode != 0:
         return False
 
