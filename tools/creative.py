@@ -5,7 +5,6 @@ import platform
 from pathlib import Path
 import uuid
 from typing import Any
-from urllib.parse import urlparse
 
 import boto3
 import pypdfium2 as pdfium
@@ -23,7 +22,7 @@ if platform.system() == "Darwin":
         "/opt/homebrew/opt/harfbuzz/lib",
         "/opt/homebrew/opt/fontconfig/lib",
     ]
-    parts = [p for p in existing_library_path.split(":") if p]
+    parts = [part for part in existing_library_path.split(":") if part]
     for path in reversed(extra_paths):
         if not Path(path).exists():
             continue
@@ -36,11 +35,10 @@ import weasyprint
 
 def _render_html_to_png_bytes(html: str) -> bytes:
     """Render HTML to a 1080x1080 PNG byte string."""
+
     pdf_bytes = weasyprint.HTML(string=html).write_pdf()
     with pdfium.PdfDocument(io.BytesIO(pdf_bytes)) as pdf:
         page = pdf[0]
-        # WeasyPrint maps CSS px at 96 DPI; PDF's native DPI is 72.
-        # Scale = 96/72 lifts the render back up to one pixel per CSS px.
         pil_img = page.render(scale=96 / 72).to_pil()
         if pil_img.size != _PNG_SIZE:
             pil_img = pil_img.resize(_PNG_SIZE, Image.LANCZOS)
@@ -52,15 +50,17 @@ def _render_html_to_png_bytes(html: str) -> bytes:
 def _s3_client():
     return boto3.client(
         "s3",
-        endpoint_url=os.environ["AWS_ENDPOINT_URL"],
-        region_name=os.environ.get("AWS_REGION", "auto"),
+        aws_access_key_id=os.environ["TIGRIS_STORAGE_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["TIGRIS_STORAGE_SECRET_ACCESS_KEY"],
+        endpoint_url=os.environ.get("TIGRIS_API_ENDPOINT", "https://t3.storage.dev"),
+        region_name="auto",
         config=Config(s3={"addressing_style": "virtual"}),
     )
 
 
 def _upload_png(png_bytes: bytes, key: str) -> str:
-    bucket = os.environ["TIGRIS_BUCKET"]
-    endpoint = os.environ["AWS_ENDPOINT_URL"]
+    bucket = os.environ["TIGRIS_STORAGE_BUCKET"]
+    public_host = os.environ.get("TIGRIS_PUBLIC_HOST", "t3.tigrisfiles.io")
     s3 = _s3_client()
     s3.put_object(
         Bucket=bucket,
@@ -69,14 +69,12 @@ def _upload_png(png_bytes: bytes, key: str) -> str:
         ACL="public-read",
         ContentType="image/png",
     )
-    parsed = urlparse(endpoint)
-    scheme = parsed.scheme or "https"
-    host = parsed.netloc or parsed.path
-    return f"{scheme}://{bucket}.{host}/{key}"
+    return f"https://{bucket}.{public_host}/{key}"
 
 
 async def _render_handler(args: dict[str, Any]) -> dict[str, Any]:
-    """Render HTML -> PNG and upload it to Tigris."""
+    """Render HTML to PNG and upload it to Tigris."""
+
     variant_id = uuid.uuid4().hex[:10]
     png_bytes = _render_html_to_png_bytes(args["html"])
     key = f"creatives/{variant_id}.png"
