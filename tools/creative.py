@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import platform
 import uuid
 from typing import Any
 
@@ -9,9 +10,24 @@ import pypdfium2 as pdfium
 from botocore.client import Config
 from claude_agent_sdk import tool
 from PIL import Image
-import weasyprint
 
 _PNG_SIZE = (1080, 1080)
+
+if platform.system() == "Darwin":
+    existing_library_path = os.environ.get("DYLD_LIBRARY_PATH", "")
+    extra_paths = [
+        "/opt/homebrew/opt/glib/lib",
+        "/opt/homebrew/opt/pango/lib",
+        "/opt/homebrew/opt/harfbuzz/lib",
+        "/opt/homebrew/opt/fontconfig/lib",
+    ]
+    parts = [p for p in existing_library_path.split(":") if p]
+    for path in reversed(extra_paths):
+        if path not in parts:
+            parts.insert(0, path)
+    os.environ["DYLD_LIBRARY_PATH"] = ":".join(parts)
+
+import weasyprint
 
 
 def _render_html_to_png_bytes(html: str) -> bytes:

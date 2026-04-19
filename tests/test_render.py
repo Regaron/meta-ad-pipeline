@@ -1,6 +1,6 @@
+import asyncio
 import io
 import json
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,11 +21,12 @@ def _tigris_env(monkeypatch):
     monkeypatch.setenv("TIGRIS_BUCKET", "ad-pipeline-creatives")
 
 
-@pytest.mark.asyncio
-async def test_render_creative_produces_1080_png_and_uploads_to_tigris(monkeypatch):
+@mock_aws
+def test_render_creative_produces_1080_png_and_uploads_to_tigris(monkeypatch):
     """render_creative must: render PDF -> PNG, upload with public-read ACL, return URL."""
-    # Arrange: create the bucket in moto
-    with mock_aws():
+
+    async def _run() -> None:
+        # Arrange: create the bucket in moto
         monkeypatch.delenv("AWS_ENDPOINT_URL")
         s3 = boto3.client("s3", region_name="us-east-1")
         s3.create_bucket(Bucket="ad-pipeline-creatives")
@@ -58,3 +59,5 @@ async def test_render_creative_produces_1080_png_and_uploads_to_tigris(monkeypat
         img = Image.open(io.BytesIO(png_bytes))
         assert img.format == "PNG"
         assert img.size == (1080, 1080)
+
+    asyncio.run(_run())
