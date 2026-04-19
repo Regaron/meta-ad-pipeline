@@ -375,6 +375,7 @@ class _ToolCtx:
     lf_span: Any | None = None
     cl_step: cl.Step | None = None
     tool_name: str | None = None
+    tool_input: dict[str, Any] | None = None
 
 
 class TraceSession:
@@ -401,13 +402,13 @@ class TraceSession:
         self._agent_ctx: dict[str, _AgentCtx] = {}
         # Tool spans keyed by tool_use_id.
         self._tool_ctx: dict[str, _ToolCtx] = {}
-        # Last render_creative payload that's awaiting a critique verdict.
-        # We don't show a creative card in chat until critique says OK (or is
-        # skipped). If the creative-director bails without critiquing, we
-        # fall back to emitting it at session close so the user never sees a
-        # blank run. Per-variant isolation isn't needed - the iterative loop
-        # runs one render/critique pair at a time.
-        self._pending_render: dict[str, Any] | None = None
+        # render_creative payloads awaiting a critique verdict, keyed by
+        # png_url so multiple variants can be in flight simultaneously
+        # (the creative-director often batches renders before critiquing).
+        # We don't show a creative card in chat until critique_render for
+        # that specific png_url returns verdict=ok / skipped. Session close
+        # flushes any still-pending renders so a silent run never happens.
+        self._pending_renders: dict[str, dict[str, Any]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -560,7 +561,10 @@ class TraceSession:
         step.input = _tool_input_summary(block)
         await step.send()
         self._tool_ctx[block.id] = _ToolCtx(
-            lf_span=lf_span, cl_step=step, tool_name=block.name
+            lf_span=lf_span,
+            cl_step=step,
+            tool_name=block.name,
+            tool_input=dict(block.input or {}),
         )
 
     async def _on_user(self, msg: UserMessage) -> None:
@@ -595,7 +599,7 @@ class TraceSession:
                 await ctx.cl_step.update()
 
             if not is_error:
-                await self._gated_emit_card(tool_name, output)
+                await self._gated_emit_card(tool_name, ctx.tool_input, output)
             return
 
         if tool_use_id in self._agent_ctx:
@@ -633,14 +637,22 @@ class TraceSession:
             status_message=msg.stop_reason if msg.is_error else None,
         )
 
-    async def _gated_emit_card(self, tool_name: str | None, tool_content: Any) -> None:
+    async def _gated_emit_card(
+        self,
+        tool_name: str | None,
+        tool_input: dict[str, Any] | None,
+        tool_content: Any,
+    ) -> None:
         """Emit in-chat result cards with critique gating.
 
         - `scrape_url` → always emit (brand research isn't iterative).
-        - `render_creative` → hold in self._pending_render; do NOT emit yet.
-        - `critique_render` → if verdict == "ok" or skipped_reason set,
-          flush the pending render. On "iterate", keep the pending render
-          so the next render replaces it (or session close emits it).
+        - `render_creative` → park the payload under its png_url; do NOT
+          emit yet. Multiple variants may be pending simultaneously.
+        - `critique_render` → look up the pending render by the critique's
+          png_url input. If verdict=ok / skipped, flush that specific
+          render. On iterate, drop it so the next render for that slot
+          replaces it. Never emit the wrong variant's card for a
+          critique result.
         """
         if tool_name is None:
             return
@@ -653,33 +665,46 @@ class TraceSession:
             return
 
         if tool_name == "mcp__adpipeline__render_creative":
-            self._pending_render = payload
+            png_url = payload.get("png_url")
+            if isinstance(png_url, str) and png_url:
+                self._pending_renders[png_url] = payload
             return
 
         if tool_name == "mcp__adpipeline__critique_render":
+            # Match the critique to the render it was about via png_url.
+            critiqued_url = (tool_input or {}).get("png_url")
+            if not isinstance(critiqued_url, str):
+                return
+            pending = self._pending_renders.get(critiqued_url)
+            if pending is None:
+                return
             verdict = payload.get("verdict")
             skipped = payload.get("skipped_reason")
-            if self._pending_render is None:
-                return
             if verdict == "ok" or skipped:
-                pending, self._pending_render = self._pending_render, None
+                self._pending_renders.pop(critiqued_url, None)
                 try:
                     await _emit_creative_card(pending)
                 except Exception:
                     pass
-            # verdict == "iterate": keep pending; next render overwrites.
+            elif verdict == "iterate":
+                # Drop the rejected render; the next render for this
+                # variant slot will populate a new pending entry under
+                # its own fresh png_url.
+                self._pending_renders.pop(critiqued_url, None)
             return
 
     async def close(self, error: BaseException | None = None) -> None:
-        # Fail-open: if the creative-director rendered something but never
-        # ran a critique (or was cut off mid-iteration), still show the
-        # user the last render so they don't see a silent run.
-        if self._pending_render is not None:
-            try:
-                await _emit_creative_card(self._pending_render)
-            except Exception:
-                pass
-            self._pending_render = None
+        # Fail-open: if the creative-director rendered any variants but
+        # never critiqued them (or was cut off mid-iteration), flush all
+        # pending renders so the user sees every variant that made it to
+        # Tigris rather than a silent run.
+        if self._pending_renders:
+            for pending in list(self._pending_renders.values()):
+                try:
+                    await _emit_creative_card(pending)
+                except Exception:
+                    pass
+            self._pending_renders.clear()
 
         # Close any leftover tool/subagent ctxs (defensive - normally
         # ToolResultBlocks close them before we get here).

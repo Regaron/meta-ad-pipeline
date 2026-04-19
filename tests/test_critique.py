@@ -19,38 +19,51 @@ def _anthropic_response(text: str):
 
 
 @pytest.mark.asyncio
-async def test_critique_returns_neutral_verdict_without_api_key(monkeypatch):
+async def test_critique_uses_claude_code_first(monkeypatch):
+    """Primary path: claude-agent-sdk query() with the image in the user
+    message. Should succeed even when ANTHROPIC_API_KEY is absent."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    result = await _critique_handler(
-        {"png_url": "https://x/creatives/a.png", "variant_note": "A"}
-    )
+    async def fake_cc(png_url, prompt_text):
+        assert png_url == "https://cdn/x.png"
+        return (
+            json.dumps({"verdict": "ok", "issues": [], "strengths": ["clear"]}),
+            None,
+        )
 
-    assert result["content"][0]["type"] == "text"
+    with patch("tools.critique._critique_via_claude_code", side_effect=fake_cc):
+        result = await _critique_handler(
+            {"png_url": "https://cdn/x.png", "variant_note": "v1"}
+        )
+
     payload = json.loads(result["content"][0]["text"])
     assert payload["verdict"] == "ok"
-    assert payload["issues"] == []
-    assert "ANTHROPIC_API_KEY" in payload["skipped_reason"]
+    assert payload["strengths"] == ["clear"]
+    assert "skipped_reason" not in payload
 
 
 @pytest.mark.asyncio
-async def test_critique_parses_json_verdict_from_model(monkeypatch):
+async def test_critique_falls_back_to_anthropic_api_when_claude_code_unavailable(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    async def failing_cc(png_url, prompt_text):
+        return None, "claude-code not available"
 
     fake_client = MagicMock()
     fake_client.messages.create.return_value = _anthropic_response(
         json.dumps(
             {
                 "verdict": "iterate",
-                "issues": [
-                    {"area": "headline", "severity": "block", "detail": "wraps per-word"}
-                ],
-                "strengths": ["palette is cohesive"],
+                "issues": [{"area": "headline", "severity": "block", "detail": "wraps"}],
+                "strengths": [],
             }
         )
     )
 
-    with patch("tools.critique._get_client", return_value=fake_client):
+    with (
+        patch("tools.critique._critique_via_claude_code", side_effect=failing_cc),
+        patch("tools.critique._get_client", return_value=fake_client),
+    ):
         result = await _critique_handler(
             {"png_url": "https://cdn/x.png", "variant_note": "v1"}
         )
@@ -58,25 +71,40 @@ async def test_critique_parses_json_verdict_from_model(monkeypatch):
     payload = json.loads(result["content"][0]["text"])
     assert payload["verdict"] == "iterate"
     assert payload["issues"][0]["area"] == "headline"
-    assert payload["strengths"] == ["palette is cohesive"]
 
-    # The Anthropic call was made with an image block carrying the url.
+    # Confirm Anthropic API got the image URL.
     call = fake_client.messages.create.call_args
     user_content = call.kwargs["messages"][0]["content"]
     image_block = next(b for b in user_content if b["type"] == "image")
-    assert image_block["source"]["type"] == "url"
     assert image_block["source"]["url"] == "https://cdn/x.png"
 
 
 @pytest.mark.asyncio
+async def test_critique_neutral_when_both_paths_fail(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    async def failing_cc(png_url, prompt_text):
+        return None, "cli not logged in"
+
+    with patch("tools.critique._critique_via_claude_code", side_effect=failing_cc):
+        result = await _critique_handler(
+            {"png_url": "https://cdn/x.png", "variant_note": "v1"}
+        )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["verdict"] == "ok"  # fail-open so the pipeline doesn't block.
+    assert "cli not logged in" in payload["skipped_reason"]
+    assert "ANTHROPIC_API_KEY" in payload["skipped_reason"]
+
+
+@pytest.mark.asyncio
 async def test_critique_strips_code_fences_from_model_output(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-
     fenced = '```json\n{"verdict": "ok", "issues": [], "strengths": []}\n```'
-    fake_client = MagicMock()
-    fake_client.messages.create.return_value = _anthropic_response(fenced)
 
-    with patch("tools.critique._get_client", return_value=fake_client):
+    async def fake_cc(png_url, prompt_text):
+        return fenced, None
+
+    with patch("tools.critique._critique_via_claude_code", side_effect=fake_cc):
         result = await _critique_handler({"png_url": "https://x/y.png", "variant_note": ""})
 
     payload = json.loads(result["content"][0]["text"])
@@ -85,30 +113,25 @@ async def test_critique_strips_code_fences_from_model_output(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_critique_falls_back_when_model_returns_garbage(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    async def fake_cc(png_url, prompt_text):
+        return "not json at all", None
 
-    fake_client = MagicMock()
-    fake_client.messages.create.return_value = _anthropic_response("not json at all")
-
-    with patch("tools.critique._get_client", return_value=fake_client):
+    with patch("tools.critique._critique_via_claude_code", side_effect=fake_cc):
         result = await _critique_handler({"png_url": "https://x/y.png", "variant_note": ""})
 
     payload = json.loads(result["content"][0]["text"])
-    # Falls back to ok so the pipeline isn't blocked by a flaky critique.
     assert payload["verdict"] == "ok"
     assert "non-JSON" in payload["skipped_reason"]
 
 
 @pytest.mark.asyncio
-async def test_critique_falls_back_on_api_exception(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+async def test_critique_falls_back_when_verdict_missing(monkeypatch):
+    async def fake_cc(png_url, prompt_text):
+        return json.dumps({"issues": []}), None  # no `verdict`
 
-    fake_client = MagicMock()
-    fake_client.messages.create.side_effect = RuntimeError("rate limited")
-
-    with patch("tools.critique._get_client", return_value=fake_client):
+    with patch("tools.critique._critique_via_claude_code", side_effect=fake_cc):
         result = await _critique_handler({"png_url": "https://x/y.png", "variant_note": ""})
 
     payload = json.loads(result["content"][0]["text"])
     assert payload["verdict"] == "ok"
-    assert "rate limited" in payload["skipped_reason"]
+    assert "missing 'verdict'" in payload["skipped_reason"]
