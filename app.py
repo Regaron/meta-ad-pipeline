@@ -1,6 +1,8 @@
 """Chainlit entrypoint for the Meta ad pipeline."""
 
 import os
+from collections.abc import AsyncIterator
+from typing import Any
 
 import chainlit as cl
 from claude_agent_sdk import (
@@ -28,6 +30,18 @@ load_dotenv()
 
 MODEL = "claude-sonnet-4-6"
 _SDK_SESSION_KEY = "sdk_session_id"
+
+
+async def _prompt_stream(text: str) -> AsyncIterator[dict[str, Any]]:
+    """Wrap a single user turn in the SDK's streaming envelope. `can_use_tool`
+    requires the SDK's bidirectional streaming mode, which means prompts must
+    be an AsyncIterable of message dicts rather than a plain string."""
+    yield {
+        "type": "user",
+        "session_id": "",
+        "message": {"role": "user", "content": text},
+        "parent_tool_use_id": None,
+    }
 
 
 async def _allow_all_tools(
@@ -94,7 +108,9 @@ async def on_message(message: cl.Message) -> None:
         user_session_id=str(chainlit_session_id),
         prompt=message.content,
     ) as trace:
-        async for event in query(prompt=message.content, options=options):
+        async for event in query(
+            prompt=_prompt_stream(message.content), options=options
+        ):
             await trace.ingest(event)
 
             if isinstance(event, ResultMessage):
