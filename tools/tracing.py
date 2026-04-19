@@ -56,12 +56,14 @@ _FRIENDLY_TOOL_NAMES = {
     "mcp__adpipeline__scrape_url": "Brand research",
     "mcp__adpipeline__render_creative": "Render creative",
     "mcp__adpipeline__view_brand_reference": "View reference",
+    "mcp__adpipeline__critique_render": "Critique render",
 }
 
 _TOOL_ICONS = {
     "mcp__adpipeline__scrape_url": "search",
     "mcp__adpipeline__render_creative": "image",
     "mcp__adpipeline__view_brand_reference": "eye",
+    "mcp__adpipeline__critique_render": "scan-eye",
 }
 
 
@@ -256,6 +258,8 @@ async def _emit_creative_card(payload: dict[str, Any]) -> None:
 
 
 async def _emit_result_card(tool_name: str | None, tool_content: Any) -> None:
+    """Unconditional card emission - kept for callers that don't want gating
+    (brand research, etc.). Render_creative is gated via TraceSession now."""
     if tool_name is None:
         return
     text = _extract_tool_text(tool_content)
@@ -273,6 +277,17 @@ async def _emit_result_card(tool_name: str | None, tool_content: Any) -> None:
     if tool_name == "mcp__adpipeline__render_creative" and isinstance(payload, dict):
         await _emit_creative_card(payload)
         return
+
+
+def _parse_tool_json(tool_content: Any) -> dict[str, Any] | None:
+    text = _extract_tool_text(tool_content)
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _infer_tool_name_from_step(step: Any) -> str | None:
@@ -359,6 +374,7 @@ class _AgentCtx:
 class _ToolCtx:
     lf_span: Any | None = None
     cl_step: cl.Step | None = None
+    tool_name: str | None = None
 
 
 class TraceSession:
@@ -385,6 +401,13 @@ class TraceSession:
         self._agent_ctx: dict[str, _AgentCtx] = {}
         # Tool spans keyed by tool_use_id.
         self._tool_ctx: dict[str, _ToolCtx] = {}
+        # Last render_creative payload that's awaiting a critique verdict.
+        # We don't show a creative card in chat until critique says OK (or is
+        # skipped). If the creative-director bails without critiquing, we
+        # fall back to emitting it at session close so the user never sees a
+        # blank run. Per-variant isolation isn't needed - the iterative loop
+        # runs one render/critique pair at a time.
+        self._pending_render: dict[str, Any] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -536,7 +559,9 @@ class TraceSession:
         )
         step.input = _tool_input_summary(block)
         await step.send()
-        self._tool_ctx[block.id] = _ToolCtx(lf_span=lf_span, cl_step=step)
+        self._tool_ctx[block.id] = _ToolCtx(
+            lf_span=lf_span, cl_step=step, tool_name=block.name
+        )
 
     async def _on_user(self, msg: UserMessage) -> None:
         content = msg.content
@@ -553,10 +578,8 @@ class TraceSession:
     ) -> None:
         if tool_use_id in self._tool_ctx:
             ctx = self._tool_ctx.pop(tool_use_id)
-            tool_name = None
+            tool_name = ctx.tool_name
             if ctx.lf_span is not None:
-                tool_name = (ctx.lf_span.kwargs.get("metadata") or {}).get("tool_name") \
-                    if hasattr(ctx.lf_span, "kwargs") else None
                 ctx.lf_span.update(
                     output=_preview(output),
                     level="ERROR" if is_error else None,
@@ -572,7 +595,7 @@ class TraceSession:
                 await ctx.cl_step.update()
 
             if not is_error:
-                await _emit_result_card(tool_name, output)
+                await self._gated_emit_card(tool_name, output)
             return
 
         if tool_use_id in self._agent_ctx:
@@ -610,7 +633,54 @@ class TraceSession:
             status_message=msg.stop_reason if msg.is_error else None,
         )
 
+    async def _gated_emit_card(self, tool_name: str | None, tool_content: Any) -> None:
+        """Emit in-chat result cards with critique gating.
+
+        - `scrape_url` → always emit (brand research isn't iterative).
+        - `render_creative` → hold in self._pending_render; do NOT emit yet.
+        - `critique_render` → if verdict == "ok" or skipped_reason set,
+          flush the pending render. On "iterate", keep the pending render
+          so the next render replaces it (or session close emits it).
+        """
+        if tool_name is None:
+            return
+        payload = _parse_tool_json(tool_content)
+        if payload is None:
+            return
+
+        if tool_name == "mcp__adpipeline__scrape_url":
+            await _emit_brand_research_card(payload)
+            return
+
+        if tool_name == "mcp__adpipeline__render_creative":
+            self._pending_render = payload
+            return
+
+        if tool_name == "mcp__adpipeline__critique_render":
+            verdict = payload.get("verdict")
+            skipped = payload.get("skipped_reason")
+            if self._pending_render is None:
+                return
+            if verdict == "ok" or skipped:
+                pending, self._pending_render = self._pending_render, None
+                try:
+                    await _emit_creative_card(pending)
+                except Exception:
+                    pass
+            # verdict == "iterate": keep pending; next render overwrites.
+            return
+
     async def close(self, error: BaseException | None = None) -> None:
+        # Fail-open: if the creative-director rendered something but never
+        # ran a critique (or was cut off mid-iteration), still show the
+        # user the last render so they don't see a silent run.
+        if self._pending_render is not None:
+            try:
+                await _emit_creative_card(self._pending_render)
+            except Exception:
+                pass
+            self._pending_render = None
+
         # Close any leftover tool/subagent ctxs (defensive - normally
         # ToolResultBlocks close them before we get here).
         for ctx in list(self._tool_ctx.values()):
