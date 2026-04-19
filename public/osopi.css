@@ -1,12 +1,27 @@
-/* osopi brand accents over Chainlit shadcn tokens */
+/* osopi brand accents over Chainlit shadcn tokens.
+ * Chainlit consumes these via hsl(var(--primary)), so values MUST be
+ * space-separated HSL triples (H S% L%) — not oklch(), not hsl(...).
+ */
 :root {
-  --primary: oklch(0.68 0.20 30);
-  --primary-foreground: oklch(0.98 0.02 80);
-  --ring: oklch(0.68 0.20 30);
+  --primary: 22 95% 55%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 22 95% 55%;
 }
 
 .dark {
-  --primary: oklch(0.72 0.18 35);
-  --primary-foreground: oklch(0.18 0.02 30);
-  --ring: oklch(0.72 0.18 35);
+  --primary: 24 95% 60%;
+  --primary-foreground: 20 15% 10%;
+  --ring: 24 95% 60%;
+}
+
+/* Hard overrides for elements that bypass the token (browser cache / variant safety). */
+#chat-submit,
+#chat-submit:hover {
+  background-color: hsl(24 95% 60%) !important;
+  color: hsl(20 15% 10%) !important;
+}
+
+/* Step tree connector line (expanded Campaign Coordinator accordion). */
+[class*="border-l"][class*="border-primary"] {
+  border-left-color: hsl(24 95% 60%) !important;
 }
