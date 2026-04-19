@@ -56,12 +56,14 @@ _FRIENDLY_TOOL_NAMES = {
     "mcp__adpipeline__scrape_url": "Brand research",
     "mcp__adpipeline__render_creative": "Render creative",
     "mcp__adpipeline__view_brand_reference": "View reference",
+    "mcp__adpipeline__critique_render": "Critique render",
 }
 
 _TOOL_ICONS = {
     "mcp__adpipeline__scrape_url": "search",
     "mcp__adpipeline__render_creative": "image",
     "mcp__adpipeline__view_brand_reference": "eye",
+    "mcp__adpipeline__critique_render": "scan-eye",
 }
 
 
@@ -256,6 +258,8 @@ async def _emit_creative_card(payload: dict[str, Any]) -> None:
 
 
 async def _emit_result_card(tool_name: str | None, tool_content: Any) -> None:
+    """Unconditional card emission - kept for callers that don't want gating
+    (brand research, etc.). Render_creative is gated via TraceSession now."""
     if tool_name is None:
         return
     text = _extract_tool_text(tool_content)
@@ -275,6 +279,17 @@ async def _emit_result_card(tool_name: str | None, tool_content: Any) -> None:
         return
 
 
+def _parse_tool_json(tool_content: Any) -> dict[str, Any] | None:
+    text = _extract_tool_text(tool_content)
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _infer_tool_name_from_step(step: Any) -> str | None:
     """Fallback when Langfuse is disabled and we only have the Chainlit step."""
     name = getattr(step, "name", None)
@@ -288,24 +303,64 @@ def _infer_tool_name_from_step(step: Any) -> str | None:
 
 def _tool_output_summary(content: Any, *, is_error: bool | None) -> str:
     prefix = "⚠️ " if is_error else ""
-    if isinstance(content, list):
-        parts: list[str] = []
-        for blk in content:
-            if not isinstance(blk, dict):
-                parts.append(_preview(blk, limit=400))
-                continue
-            btype = blk.get("type")
-            if btype == "text":
-                parts.append(str(blk.get("text", "")))
-            elif btype == "image":
-                src = blk.get("source") or {}
-                parts.append(f"[image {src.get('url') or src.get('media_type') or 'image'}]")
-            else:
-                parts.append(_preview(blk, limit=400))
-        body = "\n".join(p for p in parts if p)
-    else:
-        body = _preview(content, limit=800) or ""
+    parts = _render_tool_output_parts(content)
+    body = "\n".join(p for p in parts if p)
+    if not body:
+        # Last-resort fallback so a step never ends with an empty card.
+        body = "Failed with no details." if is_error else "Succeeded with no output."
     return prefix + body
+
+
+def _render_tool_output_parts(content: Any, *, depth: int = 0) -> list[str]:
+    """Render an MCP tool result into human-readable lines.
+
+    Defensive against the shapes that actually show up in the wild:
+      - flat string
+      - list of content blocks (dicts with `type`)
+      - dict with a nested `content` list (happens when the SDK wraps an
+        error / image block twice)
+      - raw base64 payloads under `data` / `source.data` - we never echo
+        base64 bytes back into the UI, we show the media type only.
+    """
+    if depth > 3:
+        return ["[…truncated]"]
+
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [_preview(content, limit=600)]
+    if isinstance(content, dict):
+        # Unwrap `{"content": [...]}` / `{"result": ...}` envelopes.
+        nested = content.get("content") if isinstance(content.get("content"), list) else None
+        if nested is not None:
+            return _render_tool_output_parts(nested, depth=depth + 1)
+        return [_render_block(content)]
+    if isinstance(content, list):
+        return [_render_block(b) if isinstance(b, dict) else _preview(b, limit=400) for b in content]
+    return [_preview(content, limit=600)]
+
+
+def _render_block(blk: dict[str, Any]) -> str:
+    btype = blk.get("type")
+    if btype == "text":
+        text = blk.get("text")
+        return _preview(str(text) if text is not None else "", limit=600)
+    if btype == "image":
+        src = blk.get("source") or {}
+        url = src.get("url")
+        media_type = src.get("media_type") or blk.get("media_type") or "image"
+        if url:
+            return f"[image {url}]"
+        return f"[image ({media_type})]"
+    if btype == "tool_result":
+        return "\n".join(_render_tool_output_parts(blk.get("content"), depth=1))
+    # Generic block: strip any base64 `data` field before previewing so the
+    # step output never leaks binary bytes (the 'data' truncation bug).
+    safe = {k: v for k, v in blk.items() if k != "data"}
+    source = safe.get("source")
+    if isinstance(source, dict) and "data" in source:
+        safe["source"] = {k: v for k, v in source.items() if k != "data"}
+    return _preview(safe, limit=400)
 
 
 @dataclass
@@ -319,6 +374,7 @@ class _AgentCtx:
 class _ToolCtx:
     lf_span: Any | None = None
     cl_step: cl.Step | None = None
+    tool_name: str | None = None
 
 
 class TraceSession:
@@ -345,6 +401,13 @@ class TraceSession:
         self._agent_ctx: dict[str, _AgentCtx] = {}
         # Tool spans keyed by tool_use_id.
         self._tool_ctx: dict[str, _ToolCtx] = {}
+        # Last render_creative payload that's awaiting a critique verdict.
+        # We don't show a creative card in chat until critique says OK (or is
+        # skipped). If the creative-director bails without critiquing, we
+        # fall back to emitting it at session close so the user never sees a
+        # blank run. Per-variant isolation isn't needed - the iterative loop
+        # runs one render/critique pair at a time.
+        self._pending_render: dict[str, Any] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -352,7 +415,7 @@ class TraceSession:
 
     @property
     def root_step_id(self) -> str | None:
-        return self._root_step.id if self._root_step is not None else None
+        return None
 
     async def __aenter__(self) -> "TraceSession":
         # Enter Langfuse session propagation so every nested span carries the
@@ -370,20 +433,19 @@ class TraceSession:
                 metadata={"agent": "coordinator"},
             )
 
-        # Root Chainlit step so tool / subagent steps can nest under one card.
-        self._root_step = cl.Step(
-            name="Campaign Coordinator",
-            type="run",
-            icon="compass",
-            default_open=True,
-            show_input=False,
-        )
-        self._root_step.input = self._prompt
-        await self._root_step.send()
+        # NO Chainlit root step for the coordinator - that wrapper hides every
+        # tool/subagent call inside a collapsed card ("Used Campaign
+        # Coordinator"). Instead, tool and subagent cl.Steps live at the top
+        # level so the user sees live progress (Brand research, Creative
+        # Director, Render creative, ...) without having to expand anything.
+        # The Langfuse trace still nests everything under `ad-pipeline.turn`
+        # via self._root_span; the UI hierarchy and trace hierarchy are
+        # decoupled on purpose.
+        self._root_step = None
 
         self._agent_ctx[""] = _AgentCtx(
             lf_span=self._root_span,
-            cl_step=self._root_step,
+            cl_step=None,
             subagent_type="coordinator",
         )
         return self
@@ -497,7 +559,9 @@ class TraceSession:
         )
         step.input = _tool_input_summary(block)
         await step.send()
-        self._tool_ctx[block.id] = _ToolCtx(lf_span=lf_span, cl_step=step)
+        self._tool_ctx[block.id] = _ToolCtx(
+            lf_span=lf_span, cl_step=step, tool_name=block.name
+        )
 
     async def _on_user(self, msg: UserMessage) -> None:
         content = msg.content
@@ -514,10 +578,8 @@ class TraceSession:
     ) -> None:
         if tool_use_id in self._tool_ctx:
             ctx = self._tool_ctx.pop(tool_use_id)
-            tool_name = None
+            tool_name = ctx.tool_name
             if ctx.lf_span is not None:
-                tool_name = (ctx.lf_span.kwargs.get("metadata") or {}).get("tool_name") \
-                    if hasattr(ctx.lf_span, "kwargs") else None
                 ctx.lf_span.update(
                     output=_preview(output),
                     level="ERROR" if is_error else None,
@@ -533,7 +595,7 @@ class TraceSession:
                 await ctx.cl_step.update()
 
             if not is_error:
-                await _emit_result_card(tool_name, output)
+                await self._gated_emit_card(tool_name, output)
             return
 
         if tool_use_id in self._agent_ctx:
@@ -571,7 +633,54 @@ class TraceSession:
             status_message=msg.stop_reason if msg.is_error else None,
         )
 
+    async def _gated_emit_card(self, tool_name: str | None, tool_content: Any) -> None:
+        """Emit in-chat result cards with critique gating.
+
+        - `scrape_url` → always emit (brand research isn't iterative).
+        - `render_creative` → hold in self._pending_render; do NOT emit yet.
+        - `critique_render` → if verdict == "ok" or skipped_reason set,
+          flush the pending render. On "iterate", keep the pending render
+          so the next render replaces it (or session close emits it).
+        """
+        if tool_name is None:
+            return
+        payload = _parse_tool_json(tool_content)
+        if payload is None:
+            return
+
+        if tool_name == "mcp__adpipeline__scrape_url":
+            await _emit_brand_research_card(payload)
+            return
+
+        if tool_name == "mcp__adpipeline__render_creative":
+            self._pending_render = payload
+            return
+
+        if tool_name == "mcp__adpipeline__critique_render":
+            verdict = payload.get("verdict")
+            skipped = payload.get("skipped_reason")
+            if self._pending_render is None:
+                return
+            if verdict == "ok" or skipped:
+                pending, self._pending_render = self._pending_render, None
+                try:
+                    await _emit_creative_card(pending)
+                except Exception:
+                    pass
+            # verdict == "iterate": keep pending; next render overwrites.
+            return
+
     async def close(self, error: BaseException | None = None) -> None:
+        # Fail-open: if the creative-director rendered something but never
+        # ran a critique (or was cut off mid-iteration), still show the
+        # user the last render so they don't see a silent run.
+        if self._pending_render is not None:
+            try:
+                await _emit_creative_card(self._pending_render)
+            except Exception:
+                pass
+            self._pending_render = None
+
         # Close any leftover tool/subagent ctxs (defensive - normally
         # ToolResultBlocks close them before we get here).
         for ctx in list(self._tool_ctx.values()):

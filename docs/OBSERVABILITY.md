@@ -67,19 +67,72 @@ ad-pipeline.turn            (agent — the coordinator's lifecycle for one user 
 | L4 — trace tree across agents, token + cost per step, filter by agent/task | Agent-type spans + `as_type=generation` with `model` + usage enable Langfuse's auto cost per step; filters: **observation type = generation**, **metadata.agent = creative-director**, **metadata.tool_name = mcp__pipeboard__create_campaign**. |
 | L5 — diff two runs, failure alerts, cost spike alerts, search across runs | Langfuse UI: **Traces → select two → Compare**; **Settings → Alerts → new alert on `level = ERROR` OR `total_cost_usd > $0.50`**; `session_id` groups every turn of a conversation so search/facet queries work across runs. |
 
-## Dashboard walk-through (for the 60-second mentor demo)
+## Verify cost pricing before the demo
 
-1. **Traces tab** — pick a recent trace. The tree shows
-   `ad-pipeline.turn → subagent.creative-director → Render creative PNG`.
-   Click any generation: `input`, `output`, model, tokens, and cost are on
-   the right-hand panel.
-2. **Select two traces → Compare** — side-by-side diff of the input/output
-   payloads and aggregate cost. Use this to show regressions between runs.
-3. **Sessions tab** — every Chainlit conversation rolls up here; token and
-   cost totals are aggregated across turns.
-4. **Settings → Alerts** — wire up `level = ERROR` to Slack; wire up a
-   `cost > threshold` alert for spike detection. Screenshots in the
-   `/evidence` folder of the submission.
+Langfuse auto-prices a generation only when the project's model catalog
+contains an exact `model` match. Run the verification script once after
+configuring keys to confirm:
+
+```bash
+uv run python scripts/verify_langfuse.py
+```
+
+- **PASS** — a Claude generation with our usage keys resolves to a
+  non-zero cost. Observability L4 is unlocked.
+- **FAIL** — the model id isn't in the Langfuse catalog. In Langfuse UI go
+  to **Settings → Models → Add model**, paste the exact id from the script
+  output (e.g. `claude-opus-4-7`), configure input/output per-1k-token
+  prices, re-run.
+
+## Dashboard walk-through (60-second mentor demo)
+
+1. **Traces tab** — pick the most recent trace. Expand the tree:
+   `ad-pipeline.turn → subagent.creative-director → Render creative`.
+   Click any generation — `input`, `output`, model, tokens, and cost land
+   on the right-hand panel (**L3 requirement**).
+2. **Filter chip: `observation type = generation` + `metadata.agent =
+   creative-director`** — isolates the subagent's LLM turns with
+   per-step cost (**L4 requirement — filter by agent/task**).
+3. **Select two traces → Compare** — side-by-side diff of the
+   input/output payloads, per-step cost, and run duration (**L5
+   requirement — diff two runs**).
+4. **Sessions tab** — every Chainlit conversation (`session_id` set from
+   the Chainlit session UUID) rolls up here with aggregate tokens, cost,
+   and number of traces.
+5. **Alerts tab** (L5) — show the two pre-configured alerts described
+   below.
+
+## L5 alerts to configure once (required for L5 scoring)
+
+In Langfuse: **Settings → Alerts → New alert**.
+
+1. **Trace-level failure alert**
+   - Filter: `level = ERROR`
+   - Scope: traces
+   - Channel: Slack / email / webhook
+2. **Cost-spike alert**
+   - Filter: `total_cost_usd > 0.50` (tune to your baseline)
+   - Scope: traces
+   - Channel: same as above
+3. **Per-step failure alert** (optional — catches tool errors before the
+   whole trace rolls up)
+   - Filter: `level = ERROR` on observations with `type in [tool, agent]`
+   - Scope: observations
+
+Capture screenshots of the alert list into the submission's
+`/evidence` folder so the rubric's L5 alerts check is defensible without
+a live failure at demo time.
+
+## Searching runs (L5 requirement: search across runs)
+
+Langfuse's UI search bar supports:
+
+- `session_id = …` — grabs every turn of a given Chainlit conversation.
+- `tag = ad-pipeline` — the TraceSession tags every trace with
+  `ad-pipeline` and `chainlit`.
+- `metadata.tool_name = mcp__pipeboard__create_campaign` — jump straight
+  to every campaign creation.
+- `metadata.agent = media-buyer` — isolate media-buyer behaviour.
 
 ## Troubleshooting
 

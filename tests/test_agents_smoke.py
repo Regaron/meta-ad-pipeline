@@ -1,5 +1,9 @@
 from agents import COORDINATOR_PROMPT, CREATIVE_DIRECTOR_PROMPT, MEDIA_BUYER_PROMPT, build_agents
-from tools.mcp_server import RENDER_CREATIVE_TOOL, VIEW_BRAND_REFERENCE_TOOL
+from tools.mcp_server import (
+    CRITIQUE_RENDER_TOOL,
+    RENDER_CREATIVE_TOOL,
+    VIEW_BRAND_REFERENCE_TOOL,
+)
 
 
 def test_both_subagents_defined():
@@ -7,12 +11,17 @@ def test_both_subagents_defined():
     assert set(agents.keys()) == {"creative-director", "media-buyer"}
 
 
-def test_creative_director_has_render_and_view_tools():
+def test_creative_director_has_render_view_and_critique_tools():
     agents = build_agents()
     creative_director = agents["creative-director"]
-    assert creative_director.tools == [RENDER_CREATIVE_TOOL, VIEW_BRAND_REFERENCE_TOOL]
-    # Must explicitly scope the adpipeline MCP server so the subagent can
-    # actually invoke mcp__adpipeline__render_creative / view_brand_reference.
+    # critique_render gives the creative-director a vision-based judgment
+    # loop that goes through the raw Anthropic API, bypassing the SDK's
+    # text-only MCP transport.
+    assert creative_director.tools == [
+        RENDER_CREATIVE_TOOL,
+        VIEW_BRAND_REFERENCE_TOOL,
+        CRITIQUE_RENDER_TOOL,
+    ]
     assert creative_director.mcpServers == ["adpipeline"]
     assert creative_director.permissionMode == "bypassPermissions"
 
@@ -47,10 +56,11 @@ def test_coordinator_prompt_defers_meta_id_lookup_to_media_buyer():
 def test_creative_director_prompt_mentions_brand_reference_inputs():
     prompt = CREATIVE_DIRECTOR_PROMPT
     flat = " ".join(prompt.split())
-    assert "view_brand_reference" in prompt
+    # view_brand_reference is explicitly disallowed on brand asset URLs now
+    # (they're CDN-signed / flaky and clutter the UI with errors).
+    assert "Do NOT call view_brand_reference" in flat
     assert "primary_color_hexes" in prompt
-    assert "creative_copy_idea.headline" in prompt
-    assert "do NOT embed" in flat
+    assert "creative_copy_idea" in prompt
 
 
 def test_creative_director_prompt_includes_design_principles():
