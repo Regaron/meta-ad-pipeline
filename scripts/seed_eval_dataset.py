@@ -47,10 +47,15 @@ def main() -> int:
     name = ds["name"]
     description = ds.get("description", "")
 
+    host = (
+        os.environ.get("LANGFUSE_HOST")
+        or os.environ.get("LANGFUSE_BASE_URL")
+        or None
+    )
     lf = Langfuse(
         public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
         secret_key=os.environ["LANGFUSE_SECRET_KEY"],
-        host=os.environ.get("LANGFUSE_HOST") or None,
+        host=host,
     )
 
     # Ensure the dataset exists. The SDK exposes create via the API shim -

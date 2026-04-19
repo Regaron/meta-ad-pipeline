@@ -141,11 +141,12 @@ def _get_langfuse() -> Any:
     sk = os.environ.get("LANGFUSE_SECRET_KEY")
     if not (pk and sk):
         return None
-    return Langfuse(
-        public_key=pk,
-        secret_key=sk,
-        host=os.environ.get("LANGFUSE_HOST") or None,
+    host = (
+        os.environ.get("LANGFUSE_HOST")
+        or os.environ.get("LANGFUSE_BASE_URL")
+        or None
     )
+    return Langfuse(public_key=pk, secret_key=sk, host=host)
 
 
 def _tool_input_summary(block: ToolUseBlock) -> str:

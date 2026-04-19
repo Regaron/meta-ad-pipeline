@@ -144,10 +144,15 @@ def _get_langfuse() -> Any | None:
         from langfuse import Langfuse
     except ImportError:
         return None
+    host = (
+        os.environ.get("LANGFUSE_HOST")
+        or os.environ.get("LANGFUSE_BASE_URL")
+        or None
+    )
     return Langfuse(
         public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
         secret_key=os.environ["LANGFUSE_SECRET_KEY"],
-        host=os.environ.get("LANGFUSE_HOST") or None,
+        host=host,
     )
 
 

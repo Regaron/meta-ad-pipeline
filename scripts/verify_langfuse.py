@@ -46,10 +46,15 @@ def emit_and_verify(model: str, wait_s: float) -> int:
     _require_keys()
     from langfuse import Langfuse
 
+    host = (
+        os.environ.get("LANGFUSE_HOST")
+        or os.environ.get("LANGFUSE_BASE_URL")
+        or None
+    )
     lf = Langfuse(
         public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
         secret_key=os.environ["LANGFUSE_SECRET_KEY"],
-        host=os.environ.get("LANGFUSE_HOST") or None,
+        host=host,
     )
 
     marker = f"verify-{uuid.uuid4().hex[:8]}"
