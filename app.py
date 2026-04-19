@@ -26,7 +26,7 @@ from tools.tracing import TraceSession
 
 load_dotenv()
 
-MODEL = "claude-opus-4-7"
+MODEL = "claude-sonnet-4-6"
 _SDK_SESSION_KEY = "sdk_session_id"
 
 
@@ -70,6 +70,7 @@ def build_options(resume_session_id: str | None) -> ClaudeAgentOptions:
             },
         },
         resume=resume_session_id,
+        setting_sources=[],
     )
 
 
