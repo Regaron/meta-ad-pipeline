@@ -15,7 +15,8 @@ __pycache__/
 .DS_Store
 
 # Chainlit
-.chainlit/
+.chainlit/*
+!.chainlit/config.toml
 .files/
 chainlit.yaml
 
