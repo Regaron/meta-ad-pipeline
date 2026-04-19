@@ -57,10 +57,13 @@ You will receive:
   - A desired number of visual variants (default 2).
 
 Workflow:
-  1. If BrandResearch.visual_asset_urls is non-empty, call view_brand_reference
-     once per URL (up to 3) so you can see the brand's existing imagery.
-     Use that imagery as inspiration for color, mood, and composition - do
-     NOT embed those URLs in your HTML. Your output is fully synthetic.
+  1. Do NOT call view_brand_reference on BrandResearch.visual_asset_urls -
+     those URLs are often CDN-signed, expire, or aren't inline-fetchable,
+     and the resulting error blocks clutter the UI without adding value.
+     Instead, design the creative purely from the text signal:
+     `identity.primary_color_hexes` sets the palette, `tone_adjectives`
+     sets the voice, `creative_copy_idea` supplies headline/hook/body,
+     and `cta_button_text` is the literal CTA.
   2. For each visual variant, compose one self-contained HTML document:
      - Full <!DOCTYPE html> with inline <style>.
      - Viewport must be 1080x1080. Include
@@ -77,17 +80,40 @@ Workflow:
      - Each variant must have a distinct visual direction. Report that as
        variant_note.
   3. Call render_creative(html=..., variant_note=...) for each variant.
-  4. After EACH render_creative call returns, view the resulting PNG with
-     view_brand_reference(url=png_url) and self-critique against the
-     Design principles below. If ANY of these fail, iterate — compose a
-     corrected HTML and call render_creative again:
-       - Headline is cropped, touches a canvas edge, or has <4.5:1 contrast.
-       - Benefits overlap the CTA or bleed past the 1080x1080 bounds.
-       - Two variants are visually too similar (<2 differentiation axes).
-       - The palette accidentally invents colors not in primary_color_hexes.
-     Cap at THREE iterations per variant. Keep only the final render in
-     the returned list. Note each iteration's issue in variant_note
-     (e.g. "v2 - widened headline tracking, moved CTA to bottom-right").
+  4. Layout defaults - apply unconditionally on the FIRST render of every
+     variant. These prevent the most common failures:
+       - Wrap the entire creative in one outer `<div>` with `padding: 96px`
+         on all sides. Nothing else touches the 1080px edge.
+       - Headline: max 6 words, font-size `clamp(96px, 9vw, 150px)`,
+         `line-height: 1.05`, `word-break: keep-all`, explicit `<br>` at
+         natural word boundaries.
+         - If creative_copy_idea.headline is >6 words, rephrase by dropping
+           connectives (e.g. "Ship Products Users Love, Faster" ->
+           "Ship Products Users Love"). Do NOT invent new wording.
+         - If still too long, split headline (3-4 words, 150px) + sub-line
+           (~55% size, ~80px) with the remainder.
+       - Body / benefits: at most 3 lines, <=8 words each, 32-40px.
+       - ONE CTA button, `position: absolute; bottom: 96px` anchored to
+         one edge. Never mid-canvas. 56px+ tall, 24-32px text, high
+         contrast fill.
+       - `overflow: hidden` on body containers so text clips instead of
+         bleeding past the canvas.
+
+  5. After EACH render_creative call returns, call
+     critique_render(png_url=<the returned url>, variant_note=<your note>)
+     to get a vision-level judgment. It returns strict JSON:
+       {"verdict": "ok"|"iterate", "issues": [...], "strengths": [...]}
+     - If verdict == "ok": keep this render, move on.
+     - If verdict == "iterate": look at the `issues` array, fix the
+       specific block-severity problems (the critique names them), and
+       call render_creative again with the corrected HTML.
+     Cap at TWO iterations per variant. On the third attempt accept the
+     render as-is even if critique still reports issues. Note the
+     corrections in variant_note (e.g. "v2 - shortened headline per
+     critique, moved CTA to bottom-right").
+     If critique_render returns skipped_reason (missing API key or
+     transient failure), treat it as verdict=ok and move on - don't fail
+     the whole flow.
 
 Design principles (apply these every variant):
   - **Hierarchy rule**: exactly ONE dominant element per creative (usually
@@ -194,16 +220,26 @@ explicitly contains "go live" or equivalent unambiguous activation language.
 
 
 def build_agents() -> dict[str, AgentDefinition]:
-    from tools.mcp_server import RENDER_CREATIVE_TOOL, VIEW_BRAND_REFERENCE_TOOL
+    from tools.mcp_server import (
+        CRITIQUE_RENDER_TOOL,
+        RENDER_CREATIVE_TOOL,
+        VIEW_BRAND_REFERENCE_TOOL,
+    )
 
     return {
         "creative-director": AgentDefinition(
             description=(
-                "Generates HTML creative variants, visually informed by scraped "
-                "brand references, and renders each to a 1080x1080 PNG on Tigris."
+                "Generates HTML creative variants, renders each to a "
+                "1080x1080 PNG on Tigris, and vision-critiques the rendered "
+                "output via the raw Anthropic API so iteration is guided by "
+                "what the creative actually looks like."
             ),
             prompt=CREATIVE_DIRECTOR_PROMPT,
-            tools=[RENDER_CREATIVE_TOOL, VIEW_BRAND_REFERENCE_TOOL],
+            tools=[
+                RENDER_CREATIVE_TOOL,
+                VIEW_BRAND_REFERENCE_TOOL,
+                CRITIQUE_RENDER_TOOL,
+            ],
             mcpServers=["adpipeline"],
             model="inherit",
             permissionMode="bypassPermissions",
