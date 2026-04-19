@@ -352,7 +352,7 @@ class TraceSession:
 
     @property
     def root_step_id(self) -> str | None:
-        return self._root_step.id if self._root_step is not None else None
+        return None
 
     async def __aenter__(self) -> "TraceSession":
         # Enter Langfuse session propagation so every nested span carries the
@@ -370,20 +370,19 @@ class TraceSession:
                 metadata={"agent": "coordinator"},
             )
 
-        # Root Chainlit step so tool / subagent steps can nest under one card.
-        self._root_step = cl.Step(
-            name="Campaign Coordinator",
-            type="run",
-            icon="compass",
-            default_open=True,
-            show_input=False,
-        )
-        self._root_step.input = self._prompt
-        await self._root_step.send()
+        # NO Chainlit root step for the coordinator - that wrapper hides every
+        # tool/subagent call inside a collapsed card ("Used Campaign
+        # Coordinator"). Instead, tool and subagent cl.Steps live at the top
+        # level so the user sees live progress (Brand research, Creative
+        # Director, Render creative, ...) without having to expand anything.
+        # The Langfuse trace still nests everything under `ad-pipeline.turn`
+        # via self._root_span; the UI hierarchy and trace hierarchy are
+        # decoupled on purpose.
+        self._root_step = None
 
         self._agent_ctx[""] = _AgentCtx(
             lf_span=self._root_span,
-            cl_step=self._root_step,
+            cl_step=None,
             subagent_type="coordinator",
         )
         return self

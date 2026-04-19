@@ -262,9 +262,11 @@ async def test_no_keys_disables_langfuse(monkeypatch):
         user_session_id="session-abc", prompt="hello"
     ) as trace:
         assert trace.enabled is False
-        # Chainlit root step still gets created even when Langfuse is disabled,
-        # so the UI hierarchy keeps working without keys.
-        assert len(_FakeStep.instances) == 1  # type: ignore[attr-defined]
+        # No root coordinator step is created - tool/subagent steps live at
+        # the top level instead so the user sees live progress without
+        # expanding anything. An assistant turn with no tool calls emits no
+        # Chainlit steps at all.
+        assert len(_FakeStep.instances) == 0  # type: ignore[attr-defined]
         await trace.ingest(_assistant(text="hi"))
         await trace.ingest(_result())
 
@@ -598,10 +600,12 @@ async def test_chainlit_step_tree_mirrors_trace(tracing):
 
     steps = _FakeStep.instances  # type: ignore[attr-defined]
     by_name = {s.name: s for s in steps}
-    # Root coordinator step, subagent card, and the render tool step.
-    assert "Campaign Coordinator" in by_name
+    # No root coordinator step - subagent card is top-level, render tool
+    # nests under it.
+    assert "Campaign Coordinator" not in by_name
     assert "Creative Director" in by_name
     assert "Render creative" in by_name
-    # Nesting via parent_id.
-    assert by_name["Creative Director"].parent_id == by_name["Campaign Coordinator"].id
+    # The subagent step has no parent (it's top-level).
+    assert by_name["Creative Director"].parent_id is None
+    # Nested tool step parents under the subagent.
     assert by_name["Render creative"].parent_id == by_name["Creative Director"].id
