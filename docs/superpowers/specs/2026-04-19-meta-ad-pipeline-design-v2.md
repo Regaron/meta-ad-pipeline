@@ -3,9 +3,9 @@
 - **Date:** 2026-04-19
 - **Status:** Draft (post-brainstorm refinements; supersedes the changed sections of v1)
 - **Layered on:** [`2026-04-19-meta-ad-pipeline-design.md`](./2026-04-19-meta-ad-pipeline-design.md) (v1)
-- **Implementation status:** worktree `meta-ad-pipeline` is mid-Task-2 of the v1 plan. Untracked `pyproject.toml`, `uv.lock`, `.env.example` reflect v1; they will be amended before commit.
+- **Implementation status:** worktree `meta-ad-pipeline` has v1 tasks 1–5 committed with passing tests (`tools/schemas.py`, `tools/scrape.py`, `tools/creative.py` plus their tests). v2 *amends* those committed files and *adds* the rest (tasks 6–10). No throw-away.
 - **Author:** brainstorming session, follow-up
-- **Terminal state of brainstorming:** this spec. Next step: writing-plans (delta plan that amends the v1 plan).
+- **Terminal state of brainstorming:** this spec. Next step: writing-plans (delta plan that amends the v1 plan in place).
 
 ## 1. Why a v2
 
@@ -133,7 +133,7 @@ The API endpoint stays at `t3.storage.dev` for upload; the public URL we *return
 
 ### 4.3 Object key convention
 
-Unchanged from v1: `creatives/{session_id}/{variant_id}.png`.
+`creatives/{variant_id}.png` (matches the as-implemented form in `tools/creative.py`). The v1 spec aspired to nest under `{session_id}/`, but the implementation uses the flat layout — variant_id is a uuid hex prefix so it's collision-free across sessions, and traceability to a chat session lives in Chainlit's data layer rather than the object key. v2 keeps the flat key.
 
 ### 4.4 ACL
 
@@ -358,41 +358,40 @@ For the avoidance of doubt — these v1 sections still apply verbatim and should
 
 ## 9. Implementation impact (delta against the v1 plan)
 
-The v1 plan (`docs/superpowers/plans/2026-04-19-meta-ad-pipeline.md`) has 10 tasks. Disposition:
+The v1 plan (`docs/superpowers/plans/2026-04-19-meta-ad-pipeline.md`) has 10 tasks. Tasks 1–5 are already committed in the worktree — v2 amends those committed files in fresh commits (no rebases, no force pushes). Tasks 6–10 build on the amended foundation.
 
-| v1 Task | Status | v2 disposition |
+| v1 Task | Worktree status | v2 disposition |
 |---|---|---|
-| 1. Clean up obsolete files + .gitignore | Done in worktree (commit `dddc103`) | Keep |
-| 2. pyproject.toml + .env.example | Untracked (mid-task) | **Amend before commit:** `.env.example` uses `TIGRIS_STORAGE_*` not `AWS_*`; bucket = `ad-images-tigris`. `pyproject.toml` unchanged. |
-| 3. Pydantic schemas (`AdCopy`, `RenderedCreative`) | Not started | **Replace `AdCopy` with `BrandResearch` family** (per §3.1). Keep `RenderedCreative`. |
-| 4. `scrape_url` tool | Not started | **New prompt + new `output_schema=BrandResearch`** (per §3.2). Test asserts BrandResearch round-trip. |
-| 5. `render_creative` tool | Not started | **Update `_s3_client` + `_upload_png` for new env vars + new public URL host** (per §4). Test asserts URL ends in `.t3.tigrisfiles.io/...`. |
-| 6. Register tools in MCP server | Not started | **Add `view_brand_reference` tool** (per §5.2). Server now exposes 3 tools, not 2. |
-| 7. Define agents (coordinator + 2 subagents) | Not started | **Updated prompts** (per §5.3, §6.2, §6.3, §7). Coordinator gains variant_count + budget_override + status decisions. Media-buyer gains agentic objective/targeting/budget composition with $50/day cap. creative-director gains `view_brand_reference` in tools list. |
-| 8. Coordinator smoke test | Not started | Updated structural assertions per §10 (objective enums, budget cap, agentic-not-baked directive, etc.). |
-| 9. Chainlit app | Not started | Unchanged shape. The `BrandResearch` payload is opaque to `app.py` — it just streams whatever the SDK emits. |
-| 10. Manual integration checklist | Not started | Update one bullet: confirm Tigris CDN URL renders in browser after upload. |
+| 1. Clean up obsolete files + .gitignore | ✅ Committed (`dddc103`) | Keep as-is |
+| 2. pyproject.toml + .env.example | ✅ Committed (`662b88e`) | **Amend `.env.example` in a new commit:** swap `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_ENDPOINT_URL` / `AWS_REGION` / `TIGRIS_BUCKET` for `TIGRIS_STORAGE_ACCESS_KEY_ID` / `TIGRIS_STORAGE_SECRET_ACCESS_KEY` / `TIGRIS_STORAGE_BUCKET=ad-images-tigris` / `TIGRIS_API_ENDPOINT=https://t3.storage.dev` (optional override) / `TIGRIS_PUBLIC_HOST=t3.tigrisfiles.io` (optional override). `pyproject.toml` itself is unchanged. |
+| 3. Pydantic schemas | ✅ Committed (`6f3d03c`) — has `AdCopy`, `RenderedCreative`, `CallToAction` Literal | **Amend `tools/schemas.py` in a new commit:** delete `AdCopy` + `CallToAction` (no agent enforces the enum anymore — media-buyer picks). Add `BrandIdentity`, `CoreValueProp`, `CreativeCopyIdea`, `BrandResearch` per §3.1 with the listed Pydantic constraints. Keep `RenderedCreative`. |
+| 4. `scrape_url` tool | ✅ Committed (`a61b4d2` + test `7558e8b`) — wraps Browser Use Cloud, returns `AdCopy` JSON | **Amend `tools/scrape.py` in a new commit:** replace `AdCopy` import with `BrandResearch`, replace the v1 ad-copy task string with the performance-marketing research prompt (§3.2). Update tool description from "structured ad copy" to "structured brand research". |
+| 5. `render_creative` tool | ✅ Committed (`9bbc665` + macOS dylib bootstrap `bd5c9a7`) — uses `AWS_ENDPOINT_URL` / `AWS_REGION` / `TIGRIS_BUCKET`; builds public URL from endpoint host | **Amend `tools/creative.py` in a new commit:** rewrite `_s3_client()` to read `TIGRIS_STORAGE_*` and `TIGRIS_API_ENDPOINT`. Rewrite `_upload_png()` to synthesize the public URL from `TIGRIS_PUBLIC_HOST` (default `t3.tigrisfiles.io`) instead of from the API endpoint host. Object key stays `creatives/{variant_id}.png`. Keep the macOS dylib bootstrap block as-is. |
+| 6. Register tools in MCP server | ⏳ Not started | **Add `view_brand_reference` tool** (per §5.2). Server exposes 3 tools (`scrape_url`, `render_creative`, `view_brand_reference`). |
+| 7. Define agents (coordinator + 2 subagents) | ⏳ Not started | **Updated prompts** (per §5.3, §6.2, §6.3, §7). Coordinator gains variant_count + budget_override + status decisions. Media-buyer gains agentic objective/targeting/budget composition with $50/day cap. creative-director gains `view_brand_reference` in tools list. |
+| 8. Coordinator smoke test | ⏳ Not started | Structural assertions per §10 (objective enums, budget cap, agentic-not-baked directive, etc.). |
+| 9. Chainlit app | ⏳ Not started | Unchanged shape vs v1. The `BrandResearch` payload is opaque to `app.py` — it just streams whatever the SDK emits. |
+| 10. Manual integration checklist | ⏳ Not started | Update one bullet: confirm Tigris CDN URL (`*.t3.tigrisfiles.io`) renders in browser after upload. |
 
-The new plan will be a small delta plan written next.
+Tests amended alongside their tools (same commits), per §10.
+
+The new plan will be a small delta plan written next, with one task per amend-commit and one task per still-pending v1 task.
 
 ## 10. Testing notes
 
-Two tests need shape changes from v1:
+Existing tests amended in the same commit as their tool:
 
-- `tests/test_schemas.py` — replace `AdCopy` tests with `BrandResearch` tests. Validate: required vs optional fields, exactly 3 tone adjectives (Pydantic `min_length`/`max_length`), at most 3 visual asset URLs, hex codes match `#[0-9A-Fa-f]{3,8}`.
-- `tests/test_scrape.py` — mock `AsyncBrowserUse.run` to return a canned `BrandResearch`; assert the tool returns it as JSON in the text content block, and that the prompt sent to Browser Use contains "performance marketing researcher" and the URL.
+- `tests/test_schemas.py` — full rewrite. Drop `AdCopy` tests; add `BrandResearch` tests. Validate: required vs optional fields (logo_url null OK, visual_asset_urls empty list OK), exactly 3 tone adjectives, exactly 3 top_3_benefits, at most 3 visual_asset_urls, primary_color_hexes 1–3, hex codes match `^#[0-9A-Fa-f]{3,8}$`. Keep `RenderedCreative` round-trip test.
+- `tests/test_scrape.py` — replace `_CANNED_COPY` (AdCopy) with `_CANNED_RESEARCH` (BrandResearch). Replace the `parsed.headline == "Premium Widgets — 20% Off"` style assertions with field-equivalents on the new schema. Replace the prompt assertions: instead of "Extract ad copy.", assert the prompt contains `"performance marketing researcher"` and `"Problem/Solution"`. `output_schema` assertion changes from `AdCopy` to `BrandResearch`. Browser Use Cloud model arg unchanged.
+- `tests/test_render.py` — env var monkeypatches change: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_ENDPOINT_URL` / `AWS_REGION` / `TIGRIS_BUCKET` → `TIGRIS_STORAGE_ACCESS_KEY_ID` / `TIGRIS_STORAGE_SECRET_ACCESS_KEY` / `TIGRIS_STORAGE_BUCKET=ad-images-tigris` / `TIGRIS_API_ENDPOINT=https://t3.storage.dev` / `TIGRIS_PUBLIC_HOST=t3.tigrisfiles.io`. Bucket name in `s3.create_bucket` → `ad-images-tigris`. URL prefix assertion → `https://ad-images-tigris.t3.tigrisfiles.io/creatives/`. URL split delimiter → `.t3.tigrisfiles.io/`. PNG/ACL/size assertions unchanged.
 
-One new test:
+New tests:
 
-- `tests/test_view_reference.py` — assert `view_brand_reference` returns the image URL wrapped as an `image` content block with `source.type=="url"`, and rejects non-HTTPS / non-image URLs (with the `HEAD`-based `Content-Type` check stubbed for the non-extension fallback case).
-
-`tests/test_render.py` — change two assertions only: bucket name → `ad-images-tigris`, URL host → `*.t3.tigrisfiles.io`. Body of the test stays the same.
-
-`tests/test_agents_smoke.py` — extended structural assertions for the agentic decisions (these are prompt-text checks, not behavioral, but they catch regressions where someone re-bakes a default into the prompt):
-
-- Coordinator prompt: mentions `variant_count`, `budget_override`, `PAUSED`, `go live`, and contains the negative directive "Do not bake adset targeting, objective, optimization goal, or budget".
-- Media-buyer prompt: mentions all five objective enums (`OUTCOME_TRAFFIC`, `OUTCOME_SALES`, `OUTCOME_LEADS`, `OUTCOME_AWARENESS`, `OUTCOME_ENGAGEMENT`); mentions `$50/day` (or `5000 cents`); mentions `budget_cap_applied`; mentions `targeting_summary`.
-- Creative-director prompt: tools list contains `view_brand_reference`; prompt mentions `view_brand_reference`, `primary_color_hexes`, and `creative_copy_idea.headline`.
+- `tests/test_view_reference.py` — assert `view_brand_reference` returns the URL wrapped as an `image` content block with `source.type=="url"` and `source.url==<input>`. Reject `http://` (assert error content block, not raise). Reject `file://`. Accept `.png` / `.jpg` / `.jpeg` / `.webp` / `.gif` extensions without HEAD. For an extension-less URL, stub `requests.head` (or whatever HTTP lib we use; reuse what's already in deps if possible) to return `Content-Type: image/png` and assert acceptance; stub to return `Content-Type: text/html` and assert rejection.
+- `tests/test_agents_smoke.py` — structural assertions on the prompt strings (not a behavioral test of the SDK):
+  - Coordinator prompt: mentions `variant_count`, `budget_override`, `PAUSED`, `go live`, and contains the negative directive "Do not bake adset targeting, objective, optimization goal, or budget".
+  - Media-buyer prompt: mentions all five objective enums (`OUTCOME_TRAFFIC`, `OUTCOME_SALES`, `OUTCOME_LEADS`, `OUTCOME_AWARENESS`, `OUTCOME_ENGAGEMENT`); mentions `$50/day` (or `5000 cents`); mentions `budget_cap_applied`; mentions `targeting_summary`.
+  - Creative-director prompt: tools list contains `view_brand_reference`; prompt mentions `view_brand_reference`, `primary_color_hexes`, and `creative_copy_idea.headline`.
 
 ## 11. Open items
 
