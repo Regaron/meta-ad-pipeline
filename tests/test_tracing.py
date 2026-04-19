@@ -537,9 +537,12 @@ async def test_render_without_critique_emits_card_on_session_close(tracing):
     assert cards[0].elements[0].url == payload["png_url"]
 
 
-async def test_render_iterate_then_ok_emits_only_final_variant(tracing):
-    """First render gets verdict=iterate (no card). Second render gets
-    verdict=ok (card emits). Iteration should hide the intermediate."""
+async def test_render_iterate_then_ok_emits_accepted_and_close_flushes_rejected(tracing):
+    """First render gets verdict=iterate (kept pending so it's never
+    silently dropped). Second render gets verdict=ok (emits immediately).
+    At session close the still-pending rejected render flushes too - the
+    user would rather see an imperfect variant than nothing for a variant
+    slot they asked for."""
     _FakeMessage.instances.clear()  # type: ignore[attr-defined]
     first = {
         "variant_id": "draft1",
@@ -611,10 +614,11 @@ async def test_render_iterate_then_ok_emits_only_final_variant(tracing):
         await trace.ingest(_result())
 
     cards = [m for m in _FakeMessage.instances if "Creative" in (m.content or "")]  # type: ignore[attr-defined]
-    # Only the accepted variant shows up - draft1 never got a card.
-    assert len(cards) == 1
-    assert final["variant_id"] in cards[0].content
-    assert "draft1" not in cards[0].content
+    # Both land: the accepted one immediately, the rejected one at close.
+    assert len(cards) == 2
+    ids_in_cards = " ".join(c.content for c in cards)
+    assert final["variant_id"] in ids_in_cards
+    assert "draft1" in ids_in_cards
 
 
 async def test_critique_skipped_still_emits_card(tracing):
