@@ -495,9 +495,9 @@ async def test_scrape_url_result_emits_brand_research_card(tracing):
     assert card.sent == 1
 
 
-async def test_render_without_critique_emits_card_on_session_close(tracing):
-    """If render happens but no critique ever runs, we fall back to emitting
-    the last render at session close so the user isn't left with nothing."""
+async def test_render_emits_card_immediately(tracing):
+    """Every render_creative emits its card immediately - no critique gating.
+    The critique verdict is still visible in the cl.Step tree."""
     _FakeMessage.instances.clear()  # type: ignore[attr-defined]
     payload = {
         "variant_id": "abc123",
@@ -510,25 +510,19 @@ async def test_render_without_critique_emits_card_on_session_close(tracing):
         tool_use_id = "toolu_render_1"
         await trace.ingest(
             _assistant(
-                text="Rendering",
-                tool_uses=[
-                    {
-                        "id": tool_use_id,
-                        "name": "mcp__adpipeline__render_creative",
-                        "input": {"html": "<html/>", "variant_note": "A/B split"},
-                    }
-                ],
+                tool_uses=[{
+                    "id": tool_use_id,
+                    "name": "mcp__adpipeline__render_creative",
+                    "input": {"html": "<x/>", "variant_note": "A"},
+                }],
             )
         )
         await trace.ingest(
-            _user_tool_result(
-                tool_use_id, [{"type": "text", "text": json.dumps(payload)}]
-            )
+            _user_tool_result(tool_use_id, [{"type": "text", "text": json.dumps(payload)}])
         )
-        # No critique tool call happens before ResultMessage: the pending
-        # render is released on session close.
-        msgs_mid = [m for m in _FakeMessage.instances if "Creative" in (m.content or "")]  # type: ignore[attr-defined]
-        assert msgs_mid == [], "creative card must not emit before critique or close"
+        # The card lands before the session ends - the step/chat sees it live.
+        cards_mid = [m for m in _FakeMessage.instances if "Creative" in (m.content or "")]  # type: ignore[attr-defined]
+        assert len(cards_mid) == 1, "card should emit on render, not on close"
         await trace.ingest(_result())
 
     cards = [m for m in _FakeMessage.instances if "Creative" in (m.content or "")]  # type: ignore[attr-defined]
@@ -537,127 +531,55 @@ async def test_render_without_critique_emits_card_on_session_close(tracing):
     assert cards[0].elements[0].url == payload["png_url"]
 
 
-async def test_render_iterate_then_ok_emits_accepted_and_close_flushes_rejected(tracing):
-    """First render gets verdict=iterate (kept pending so it's never
-    silently dropped). Second render gets verdict=ok (emits immediately).
-    At session close the still-pending rejected render flushes too - the
-    user would rather see an imperfect variant than nothing for a variant
-    slot they asked for."""
+async def test_multiple_renders_all_emit(tracing):
+    """Iterate/accept verdicts don't hide renders. Every render shows up
+    in chat; critique_render's verdict lives only in the cl.Step tree."""
     _FakeMessage.instances.clear()  # type: ignore[attr-defined]
-    first = {
-        "variant_id": "draft1",
-        "variant_note": "v1 - too cramped",
-        "png_url": "https://cdn/draft1.png",
-    }
-    final = {
-        "variant_id": "final1",
-        "variant_note": "v2 - fixed headline wrapping",
-        "png_url": "https://cdn/final1.png",
-    }
+    first = {"variant_id": "v1a", "variant_note": "v1 attempt 1", "png_url": "https://cdn/v1a.png"}
+    second = {"variant_id": "v1b", "variant_note": "v1 attempt 2 (fixed)", "png_url": "https://cdn/v1b.png"}
+    third = {"variant_id": "v2", "variant_note": "v2 accepted", "png_url": "https://cdn/v2.png"}
     import json
 
     async with tracing.TraceSession(user_session_id="s", prompt="go") as trace:
-        # First render.
-        await trace.ingest(
-            _assistant(
-                tool_uses=[{
-                    "id": "r1",
-                    "name": "mcp__adpipeline__render_creative",
-                    "input": {"html": "<x/>", "variant_note": "v1"},
-                }],
+        for i, payload in enumerate((first, second, third), start=1):
+            tid = f"r{i}"
+            await trace.ingest(
+                _assistant(
+                    tool_uses=[{
+                        "id": tid,
+                        "name": "mcp__adpipeline__render_creative",
+                        "input": {"html": "<x/>", "variant_note": payload["variant_note"]},
+                    }],
+                )
             )
-        )
-        await trace.ingest(_user_tool_result("r1", [{"type": "text", "text": json.dumps(first)}]))
+            await trace.ingest(_user_tool_result(tid, [{"type": "text", "text": json.dumps(payload)}]))
 
-        # First critique: iterate.
-        await trace.ingest(
-            _assistant(
-                tool_uses=[{
-                    "id": "c1",
-                    "name": "mcp__adpipeline__critique_render",
-                    "input": {"png_url": first["png_url"], "variant_note": "v1"},
-                }],
+        # Critique calls (verdict doesn't change chat output anymore)
+        for i, (png_url, verdict) in enumerate((
+            (first["png_url"], "iterate"),
+            (second["png_url"], "ok"),
+            (third["png_url"], "ok"),
+        ), start=1):
+            cid = f"c{i}"
+            await trace.ingest(
+                _assistant(
+                    tool_uses=[{
+                        "id": cid,
+                        "name": "mcp__adpipeline__critique_render",
+                        "input": {"png_url": png_url, "variant_note": ""},
+                    }],
+                )
             )
-        )
-        iterate_json = json.dumps({
-            "verdict": "iterate",
-            "issues": [{"area": "headline", "severity": "block", "detail": "wraps"}],
-            "strengths": [],
-        })
-        await trace.ingest(_user_tool_result("c1", [{"type": "text", "text": iterate_json}]))
-
-        # Second render.
-        await trace.ingest(
-            _assistant(
-                tool_uses=[{
-                    "id": "r2",
-                    "name": "mcp__adpipeline__render_creative",
-                    "input": {"html": "<x/>", "variant_note": "v2"},
-                }],
-            )
-        )
-        await trace.ingest(_user_tool_result("r2", [{"type": "text", "text": json.dumps(final)}]))
-
-        # Second critique: ok.
-        await trace.ingest(
-            _assistant(
-                tool_uses=[{
-                    "id": "c2",
-                    "name": "mcp__adpipeline__critique_render",
-                    "input": {"png_url": final["png_url"], "variant_note": "v2"},
-                }],
-            )
-        )
-        ok_json = json.dumps({"verdict": "ok", "issues": [], "strengths": ["clear"]})
-        await trace.ingest(_user_tool_result("c2", [{"type": "text", "text": ok_json}]))
+            verdict_json = json.dumps({"verdict": verdict, "issues": [], "strengths": ["clear"]})
+            await trace.ingest(_user_tool_result(cid, [{"type": "text", "text": verdict_json}]))
 
         await trace.ingest(_result())
 
     cards = [m for m in _FakeMessage.instances if "Creative" in (m.content or "")]  # type: ignore[attr-defined]
-    # Both land: the accepted one immediately, the rejected one at close.
-    assert len(cards) == 2
+    assert len(cards) == 3
     ids_in_cards = " ".join(c.content for c in cards)
-    assert final["variant_id"] in ids_in_cards
-    assert "draft1" in ids_in_cards
-
-
-async def test_critique_skipped_still_emits_card(tracing):
-    """If critique was skipped (e.g. missing API key), fall open and emit."""
-    _FakeMessage.instances.clear()  # type: ignore[attr-defined]
-    payload = {"variant_id": "x", "variant_note": "v1", "png_url": "https://cdn/x.png"}
-    import json
-
-    async with tracing.TraceSession(user_session_id="s", prompt="go") as trace:
-        await trace.ingest(
-            _assistant(
-                tool_uses=[{
-                    "id": "r1",
-                    "name": "mcp__adpipeline__render_creative",
-                    "input": {"html": "<x/>", "variant_note": "v1"},
-                }],
-            )
-        )
-        await trace.ingest(_user_tool_result("r1", [{"type": "text", "text": json.dumps(payload)}]))
-        await trace.ingest(
-            _assistant(
-                tool_uses=[{
-                    "id": "c1",
-                    "name": "mcp__adpipeline__critique_render",
-                    "input": {"png_url": payload["png_url"], "variant_note": "v1"},
-                }],
-            )
-        )
-        skipped_json = json.dumps({
-            "verdict": "ok",
-            "issues": [],
-            "strengths": [],
-            "skipped_reason": "ANTHROPIC_API_KEY not configured",
-        })
-        await trace.ingest(_user_tool_result("c1", [{"type": "text", "text": skipped_json}]))
-        await trace.ingest(_result())
-
-    cards = [m for m in _FakeMessage.instances if "Creative" in (m.content or "")]  # type: ignore[attr-defined]
-    assert len(cards) == 1
+    for payload in (first, second, third):
+        assert payload["variant_id"] in ids_in_cards
 
 
 async def test_tool_error_does_not_emit_card(tracing):

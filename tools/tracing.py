@@ -402,12 +402,13 @@ class TraceSession:
         self._agent_ctx: dict[str, _AgentCtx] = {}
         # Tool spans keyed by tool_use_id.
         self._tool_ctx: dict[str, _ToolCtx] = {}
-        # render_creative payloads awaiting a critique verdict, keyed by
-        # png_url so multiple variants can be in flight simultaneously
-        # (the creative-director often batches renders before critiquing).
-        # We don't show a creative card in chat until critique_render for
-        # that specific png_url returns verdict=ok / skipped. Session close
-        # flushes any still-pending renders so a silent run never happens.
+        # Every render_creative emits a card immediately - no gating on
+        # critique. Gating previously hid rejected renders entirely, which
+        # meant capped iterations / missed critiques silently swallowed
+        # variants the user asked for. The critique verdict is still
+        # visible next to each render in the cl.Step tree, so the user
+        # can tell which renders were accepted vs iterated from that
+        # timeline; the main chat shows all renders in order.
         self._pending_renders: dict[str, dict[str, Any]] = {}
 
     @property
@@ -640,19 +641,15 @@ class TraceSession:
     async def _gated_emit_card(
         self,
         tool_name: str | None,
-        tool_input: dict[str, Any] | None,
+        tool_input: dict[str, Any] | None,  # noqa: ARG002 - kept for test signature
         tool_content: Any,
     ) -> None:
-        """Emit in-chat result cards with critique gating.
+        """Emit in-chat result cards.
 
-        - `scrape_url` → always emit (brand research isn't iterative).
-        - `render_creative` → park the payload under its png_url; do NOT
-          emit yet. Multiple variants may be pending simultaneously.
-        - `critique_render` → look up the pending render by the critique's
-          png_url input. If verdict=ok / skipped, flush that specific
-          render. On iterate, drop it so the next render for that slot
-          replaces it. Never emit the wrong variant's card for a
-          critique result.
+        - `scrape_url` → brand research card.
+        - `render_creative` → variant preview card (immediately, no gating).
+        - `critique_render` → no chat card; the verdict is visible in the
+          cl.Step tree next to the corresponding render.
         """
         if tool_name is None:
             return
@@ -665,49 +662,17 @@ class TraceSession:
             return
 
         if tool_name == "mcp__adpipeline__render_creative":
-            png_url = payload.get("png_url")
-            if isinstance(png_url, str) and png_url:
-                self._pending_renders[png_url] = payload
-            return
-
-        if tool_name == "mcp__adpipeline__critique_render":
-            # Match the critique to the render it was about via png_url.
-            critiqued_url = (tool_input or {}).get("png_url")
-            if not isinstance(critiqued_url, str):
-                return
-            pending = self._pending_renders.get(critiqued_url)
-            if pending is None:
-                return
-            verdict = payload.get("verdict")
-            skipped = payload.get("skipped_reason")
-            if verdict == "ok" or skipped:
-                self._pending_renders.pop(critiqued_url, None)
-                try:
-                    await _emit_creative_card(pending)
-                except Exception:
-                    pass
-            elif verdict == "iterate":
-                # Keep the render pending. If the model caps iterations
-                # without producing another render, session close still
-                # shows this attempt. If the model does re-render, the new
-                # render joins under its own png_url and both eventually
-                # surface - better than silently losing a variant the user
-                # asked for when only one critique verdict ever fires.
+            try:
+                await _emit_creative_card(payload)
+            except Exception:
                 pass
             return
 
+        # critique_render and others: no chat card.
+
     async def close(self, error: BaseException | None = None) -> None:
-        # Fail-open: if the creative-director rendered any variants but
-        # never critiqued them (or was cut off mid-iteration), flush all
-        # pending renders so the user sees every variant that made it to
-        # Tigris rather than a silent run.
-        if self._pending_renders:
-            for pending in list(self._pending_renders.values()):
-                try:
-                    await _emit_creative_card(pending)
-                except Exception:
-                    pass
-            self._pending_renders.clear()
+        # No pending_renders flush - cards emit inline on render_creative.
+        self._pending_renders.clear()
 
         # Close any leftover tool/subagent ctxs (defensive - normally
         # ToolResultBlocks close them before we get here).

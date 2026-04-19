@@ -31,38 +31,56 @@ _CRITIQUE_MODEL = os.environ.get("AD_PIPELINE_CRITIQUE_MODEL", "claude-sonnet-4-
 
 _CRITIQUE_PROMPT = """\
 You are a senior art director reviewing a Facebook/Meta ad creative rendered
-to 1080x1080. Critique ruthlessly against these rules and return STRICT JSON
-ONLY, matching this exact shape:
+to 1080x1080. You MUST actually look at the image. If you cannot see an
+image at all, return verdict=iterate with an issue
+{area:"layout", severity:"block", detail:"image not received"} — do not
+bluff.
+
+Output STRICT JSON ONLY in this exact shape (no prose, no code fences):
 
 {
+  "observations": {
+    "headline_text": "<the literal headline text you see, verbatim>",
+    "headline_lines": <integer: visual lines the headline occupies>,
+    "dominant_colors": ["<hex or color name>", "..."],
+    "cta_position": "<e.g. 'bottom-right', 'mid-canvas', 'none'>",
+    "elements_overlapping": <true | false>,
+    "text_bleeding_past_edges": <true | false>,
+    "body_lines_truncated": <true | false>,
+    "one_word_per_line_wrapping": <true | false>
+  },
   "verdict": "ok" | "iterate",
   "issues": [
-    {"area": "headline" | "body" | "cta" | "palette" | "layout" | "hierarchy",
+    {"area": "headline" | "body" | "cta" | "palette" | "layout" | "hierarchy" | "typography",
      "severity": "block" | "nit",
-     "detail": "<one short sentence>"}
+     "detail": "<one short sentence grounded in an observation above>"}
   ],
-  "strengths": ["<one short sentence>", ...]
+  "strengths": ["<one short sentence grounded in a specific observation>", ...]
 }
 
-Rules (block-severity issues force verdict=iterate):
-  - Headline must not wrap one-word-per-line, touch a canvas edge, or be
-    truncated.
-  - No text may bleed past the 1080x1080 bounds or overlap another element.
-  - No body/benefit line may be cut off mid-sentence (trailing "..." or
-    visible clipping).
-  - Headline contrast vs background must be readable at thumbnail size
-    (mentally squint - if you can't read it in a 200x200 preview, it fails).
-  - Exactly one dominant element (usually the headline). If 3+ things
-    compete, hierarchy is broken.
-  - CTA button must be anchored (not floating mid-canvas), visibly
-    high-contrast, with clear space around it.
-  - Palette must feel cohesive - flag if colors look invented or clash.
+Fill `observations` HONESTLY before deciding. The verdict must follow
+from the observations. Err on iterate when any observation is uncertain -
+never default to ok in doubt.
 
-Nits are acceptable and should NOT force iteration. Only block-severity
-issues cause verdict=iterate.
+Block-severity (force verdict=iterate) when ANY are true:
+  - observations.elements_overlapping
+  - observations.text_bleeding_past_edges
+  - observations.body_lines_truncated
+  - observations.one_word_per_line_wrapping
+  - observations.headline_lines > 3 for a short headline (<=6 words)
+  - Headline contrast visibly under ~4.5:1 (squint test at thumbnail)
+  - Three or more elements compete for dominance (no single focal point)
+  - CTA floating mid-canvas with no anchor, OR cramped against body copy
+  - Palette clearly not from a plausible brand primary set
+  - Generic AI-slop: centered-stack-on-gradient background, unmotivated
+    glassmorphism, reflex-blue (#3B82F6) or purple-to-pink gradient bg
 
-If the creative is good, return verdict=ok with an empty issues array and
-at least one strength.
+Nits (do NOT force iteration): subtle spacing, minor tracking, small
+contrast shortfalls on decorative elements.
+
+Return verdict=ok ONLY when every observation shows zero block-severity
+issues AND at least one strength cites a specific observation (not
+generic phrases like "clean layout" or "nice typography").
 """
 
 
