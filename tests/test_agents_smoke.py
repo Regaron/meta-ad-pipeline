@@ -1,17 +1,5 @@
-"""Offline smoke: agents.build_agents and COORDINATOR_PROMPT are consistent.
-
-We can't easily replay the full claude-agent-sdk loop without a real API key,
-so we validate structural invariants that matter for correctness:
-  - Both subagents exist with the expected keys.
-  - creative-director has render_creative in its tools list.
-  - media-buyer has pipeboard in its mcpServers list.
-  - Coordinator prompt references both subagents by name and mentions scrape_url.
-"""
-
-import pytest
-
-from agents import COORDINATOR_PROMPT, build_agents
-from tools.mcp_server import RENDER_CREATIVE_TOOL
+from agents import COORDINATOR_PROMPT, CREATIVE_DIRECTOR_PROMPT, MEDIA_BUYER_PROMPT, build_agents
+from tools.mcp_server import RENDER_CREATIVE_TOOL, VIEW_BRAND_REFERENCE_TOOL
 
 
 def test_both_subagents_defined():
@@ -19,24 +7,48 @@ def test_both_subagents_defined():
     assert set(agents.keys()) == {"creative-director", "media-buyer"}
 
 
-def test_creative_director_has_only_render_tool():
+def test_creative_director_has_render_and_view_tools():
     agents = build_agents()
-    cd = agents["creative-director"]
-    assert cd.tools == [RENDER_CREATIVE_TOOL]
-    assert cd.mcpServers in (None, [])
+    creative_director = agents["creative-director"]
+    assert creative_director.tools == [RENDER_CREATIVE_TOOL, VIEW_BRAND_REFERENCE_TOOL]
+    assert creative_director.mcpServers in (None, [])
 
 
-def test_media_buyer_scoped_to_pipeboard():
+def test_media_buyer_is_scoped_to_pipeboard():
     agents = build_agents()
-    mb = agents["media-buyer"]
-    assert mb.mcpServers == ["pipeboard"]
-    # tools=None means inherit — we want that so pipeboard MCP tools are usable
-    assert mb.tools is None
+    media_buyer = agents["media-buyer"]
+    assert media_buyer.tools is None
+    assert media_buyer.mcpServers == ["pipeboard"]
 
 
-def test_coordinator_prompt_mentions_key_roles():
-    p = COORDINATOR_PROMPT
-    assert "scrape_url" in p
-    assert "creative-director" in p
-    assert "media-buyer" in p
-    assert "PAUSED" in p  # safety default must be in prompt
+def test_coordinator_prompt_mentions_variant_budget_and_agentic_delegate_rules():
+    prompt = COORDINATOR_PROMPT
+    assert "variant_count" in prompt
+    assert "budget_override" in prompt
+    assert "PAUSED" in prompt
+    assert "go live" in prompt
+    assert "Do not bake adset targeting, objective, optimization goal, or budget" in prompt
+
+
+def test_creative_director_prompt_mentions_brand_reference_inputs():
+    prompt = CREATIVE_DIRECTOR_PROMPT
+    assert "view_brand_reference" in prompt
+    assert "primary_color_hexes" in prompt
+    assert "creative_copy_idea.headline" in prompt
+    assert "do NOT embed" in prompt
+
+
+def test_media_buyer_prompt_mentions_objective_budget_and_summary_fields():
+    prompt = MEDIA_BUYER_PROMPT
+    for objective in (
+        "OUTCOME_TRAFFIC",
+        "OUTCOME_SALES",
+        "OUTCOME_LEADS",
+        "OUTCOME_AWARENESS",
+        "OUTCOME_ENGAGEMENT",
+    ):
+        assert objective in prompt
+    assert "$5-$50/day" in prompt
+    assert "budget_cap_applied" in prompt
+    assert "targeting_summary" in prompt
+    assert "status" in prompt
