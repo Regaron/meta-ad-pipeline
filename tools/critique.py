@@ -1,12 +1,22 @@
 """Vision-based critique of a rendered ad creative.
 
-The Claude Agent SDK's MCP tool transport does not reliably round-trip image
-content blocks back to the model (we lose them as 'data' strings in the
-ToolResultBlock). So we call the raw Anthropic API from inside the tool
-with the PNG's Tigris URL as an image block — that path supports vision
-natively — and return the model's structured critique back as text.
+The Claude Agent SDK's MCP *tool-result* transport does not reliably
+round-trip image content blocks back to the model (we lose them as 'data'
+strings in the ToolResultBlock). *User-message* content blocks, however,
+flow through cleanly because they go straight to Claude without MCP
+rewriting.
+
+So this tool runs a one-shot `query()` against the bundled Claude Code CLI
+with the Tigris PNG URL as an image block in the user message. That path
+uses whatever auth the CLI is already logged into (OAuth via Pro/Max
+subscription, or ANTHROPIC_API_KEY if set) - no extra API key needed.
 
 The creative-director reads the JSON verdict and iterates if issues found.
+
+Fallback order on each call:
+  1. claude-agent-sdk query() with image in user message (OAuth-first).
+  2. Raw anthropic.Anthropic() client with ANTHROPIC_API_KEY (no CLI).
+  3. Neutral verdict=ok with skipped_reason so the pipeline never blocks.
 """
 
 from __future__ import annotations
@@ -92,16 +102,73 @@ def _fallback(reason: str) -> dict[str, Any]:
     }
 
 
-async def _critique_handler(args: dict[str, Any]) -> dict[str, Any]:
-    png_url = args["png_url"]
-    variant_note = args.get("variant_note", "")
+def _strip_code_fence(raw: str) -> str:
+    raw = raw.strip()
+    if not raw.startswith("```"):
+        return raw
+    lines = raw.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
+
+async def _critique_via_claude_code(png_url: str, prompt_text: str) -> tuple[str | None, str | None]:
+    """Return (raw_text, error_reason). On success: (text, None)."""
+    try:
+        from claude_agent_sdk import (
+            AssistantMessage,
+            ClaudeAgentOptions,
+            TextBlock,
+            query,
+        )
+    except ImportError as e:  # pragma: no cover
+        return None, f"claude_agent_sdk import failed: {e}"
+
+    async def _envelope():
+        yield {
+            "type": "user",
+            "session_id": "",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "url", "url": png_url}},
+                    {"type": "text", "text": prompt_text},
+                ],
+            },
+            "parent_tool_use_id": None,
+        }
+
+    options = ClaudeAgentOptions(
+        model=_CRITIQUE_MODEL,
+        permission_mode="bypassPermissions",
+        setting_sources=[],
+    )
+
+    text_parts: list[str] = []
+    try:
+        async for event in query(prompt=_envelope(), options=options):
+            if isinstance(event, AssistantMessage):
+                # Only take top-level (non-subagent) text for the critique.
+                if getattr(event, "parent_tool_use_id", None):
+                    continue
+                for block in event.content:
+                    if isinstance(block, TextBlock):
+                        text_parts.append(block.text)
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
+
+    raw = "".join(text_parts).strip()
+    if not raw:
+        return None, "claude-code returned no text"
+    return raw, None
+
+
+async def _critique_via_anthropic_api(png_url: str, prompt_text: str) -> tuple[str | None, str | None]:
     client = _get_client()
     if client is None:
-        return _fallback("ANTHROPIC_API_KEY not configured; skipping vision critique.")
-
-    context_line = f"Variant note from the designer: {variant_note}" if variant_note else ""
-
+        return None, "ANTHROPIC_API_KEY not configured"
     try:
         resp = client.messages.create(
             model=_CRITIQUE_MODEL,
@@ -110,36 +177,42 @@ async def _critique_handler(args: dict[str, Any]) -> dict[str, Any]:
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "image",
-                            "source": {"type": "url", "url": png_url},
-                        },
-                        {
-                            "type": "text",
-                            "text": _CRITIQUE_PROMPT + ("\n\n" + context_line if context_line else ""),
-                        },
+                        {"type": "image", "source": {"type": "url", "url": png_url}},
+                        {"type": "text", "text": prompt_text},
                     ],
                 }
             ],
         )
-    except Exception as e:  # noqa: BLE001 - surface any API failure as a neutral verdict
-        return _fallback(f"vision critique failed: {type(e).__name__}: {e}")
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
 
-    # Anthropic response content is a list of blocks; collect the text blocks.
     text_parts: list[str] = []
     for block in resp.content:
         if getattr(block, "type", None) == "text":
             text_parts.append(block.text)
     raw = "\n".join(text_parts).strip()
+    if not raw:
+        return None, "api returned no text"
+    return raw, None
 
-    # The model sometimes wraps JSON in a code fence; strip it defensively.
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        raw = "\n".join(lines).strip()
+
+async def _critique_handler(args: dict[str, Any]) -> dict[str, Any]:
+    png_url = args["png_url"]
+    variant_note = args.get("variant_note", "")
+    context_line = f"Variant note from the designer: {variant_note}" if variant_note else ""
+    prompt_text = _CRITIQUE_PROMPT + ("\n\n" + context_line if context_line else "")
+
+    # Primary path: Claude Code CLI via claude-agent-sdk (uses OAuth/login).
+    raw, err_cc = await _critique_via_claude_code(png_url, prompt_text)
+    # Fallback: raw Anthropic API via ANTHROPIC_API_KEY.
+    if raw is None:
+        raw, err_api = await _critique_via_anthropic_api(png_url, prompt_text)
+        if raw is None:
+            return _fallback(
+                f"vision critique unavailable (claude-code: {err_cc}; anthropic-api: {err_api})"
+            )
+
+    raw = _strip_code_fence(raw)
 
     try:
         payload = json.loads(raw)

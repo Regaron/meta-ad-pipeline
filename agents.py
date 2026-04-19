@@ -79,7 +79,15 @@ Workflow:
        and a prominent CTA using cta_button_text.
      - Each variant must have a distinct visual direction. Report that as
        variant_note.
-  3. Call render_creative(html=..., variant_note=...) for each variant.
+  3. Process variants ONE AT A TIME, fully completing the render→critique
+     loop for a variant before starting the next. Do NOT batch renders
+     for all variants up-front and critique them at the end. Concretely,
+     for each variant independently:
+       a. render_creative(html=..., variant_note=...)
+       b. critique_render(png_url=<the url just returned>, variant_note=...)
+       c. If verdict=iterate, rewrite HTML and repeat a+b (cap 2 times)
+       d. Only after the final verdict for this variant, move to the next.
+
   4. Layout defaults - apply unconditionally on the FIRST render of every
      variant. These prevent the most common failures:
        - Wrap the entire creative in one outer `<div>` with `padding: 96px`
