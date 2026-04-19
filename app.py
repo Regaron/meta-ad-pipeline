@@ -1,21 +1,28 @@
 """Chainlit entrypoint for the Meta ad pipeline."""
 
 import os
-import re
 
 import chainlit as cl
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    PermissionResultAllow,
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ToolPermissionContext,
     query,
 )
 from dotenv import load_dotenv
 
 from agents import COORDINATOR_PROMPT, build_agents
-from tools.mcp_server import SCRAPE_URL_TOOL, adpipeline_server
+from tools.mcp_server import (
+    RENDER_CREATIVE_TOOL,
+    SCRAPE_URL_TOOL,
+    VIEW_BRAND_REFERENCE_TOOL,
+    adpipeline_server,
+)
+from tools.tracing import TraceSession
 
 load_dotenv()
 
@@ -23,12 +30,36 @@ MODEL = "claude-opus-4-7"
 _SDK_SESSION_KEY = "sdk_session_id"
 
 
+async def _allow_all_tools(
+    tool_name: str,
+    tool_input: dict,
+    context: ToolPermissionContext,
+) -> PermissionResultAllow:
+    """Blanket approve every tool call. Chainlit has no interactive approval
+    UI, so the coordinator and all subagents must run fully permissive."""
+    del tool_name, tool_input, context
+    return PermissionResultAllow()
+
+
 def build_options(resume_session_id: str | None) -> ClaudeAgentOptions:
     pipeboard_token = os.environ["PIPEBOARD_OAUTH_TOKEN"]
     return ClaudeAgentOptions(
         system_prompt=COORDINATOR_PROMPT,
         model=MODEL,
-        allowed_tools=["Agent", SCRAPE_URL_TOOL],
+        # Keep the coordinator's direct toolbox narrow but include all the
+        # adpipeline tools so it can hand-hold variant renders if a subagent
+        # stalls. Actual delegation still flows through the Agent tool.
+        allowed_tools=[
+            "Agent",
+            SCRAPE_URL_TOOL,
+            RENDER_CREATIVE_TOOL,
+            VIEW_BRAND_REFERENCE_TOOL,
+        ],
+        # Chainlit has no interactive approval UI. Bypass plus an allow-all
+        # callback guarantees every MCP tool call - for the coordinator and
+        # every subagent - is auto-approved.
+        permission_mode="bypassPermissions",
+        can_use_tool=_allow_all_tools,
         agents=build_agents(),
         mcp_servers={
             "adpipeline": adpipeline_server,
@@ -53,72 +84,41 @@ async def on_message(message: cl.Message) -> None:
     options = build_options(resume_session_id)
 
     assistant_msg: cl.Message | None = None
-    current_subagent_step: cl.Step | None = None
-    current_parent_tool_use_id: str | None = None
-    seen_image_urls: set[str] = set()
 
-    async for event in query(prompt=message.content, options=options):
-        if isinstance(event, ResultMessage):
-            if event.session_id:
-                cl.user_session.set(_SDK_SESSION_KEY, event.session_id)
-            continue
+    # Stable session identifier for Langfuse trace grouping. Chainlit's
+    # user_session.get("id") is a UUID that persists across the chat.
+    chainlit_session_id = cl.user_session.get("id") or "anonymous"
 
-        if isinstance(event, SystemMessage):
-            continue
+    async with TraceSession(
+        user_session_id=str(chainlit_session_id),
+        prompt=message.content,
+    ) as trace:
+        async for event in query(prompt=message.content, options=options):
+            await trace.ingest(event)
 
-        if not isinstance(event, AssistantMessage):
-            continue
-
-        parent_id = getattr(event, "parent_tool_use_id", None)
-        if parent_id != current_parent_tool_use_id and current_subagent_step is not None:
-            await current_subagent_step.__aexit__(None, None, None)
-            current_subagent_step = None
-            current_parent_tool_use_id = None
-
-        if parent_id and current_subagent_step is None:
-            current_subagent_step = cl.Step(name="subagent", type="run")
-            await current_subagent_step.__aenter__()
-            current_parent_tool_use_id = parent_id
-
-        for block in event.content:
-            if not isinstance(block, TextBlock):
+            if isinstance(event, ResultMessage):
+                if event.session_id:
+                    cl.user_session.set(_SDK_SESSION_KEY, event.session_id)
                 continue
 
-            if parent_id and current_subagent_step is not None:
-                current_subagent_step.output = (
-                    (current_subagent_step.output or "") + block.text
-                )
-                await current_subagent_step.update()
-            else:
+            if isinstance(event, SystemMessage):
+                continue
+
+            if not isinstance(event, AssistantMessage):
+                continue
+
+            # Subagent text is streamed into their own cl.Step cards by the
+            # tracer; only the coordinator's final-answer text reaches the
+            # top-level chat bubble.
+            if event.parent_tool_use_id:
+                continue
+
+            for block in event.content:
+                if not isinstance(block, TextBlock):
+                    continue
                 if assistant_msg is None:
                     assistant_msg = await cl.Message(content="").send()
                 await assistant_msg.stream_token(block.text)
 
-            for url in _extract_tigris_urls(block.text):
-                if url in seen_image_urls:
-                    continue
-                seen_image_urls.add(url)
-                await cl.Message(
-                    content=f"Creative: {url}",
-                    elements=[
-                        cl.Image(
-                            url=url,
-                            name=url.rsplit("/", 1)[-1],
-                            display="inline",
-                        )
-                    ],
-                ).send()
-
-    if current_subagent_step is not None:
-        await current_subagent_step.__aexit__(None, None, None)
-
     if assistant_msg is not None:
         await assistant_msg.update()
-
-
-def _extract_tigris_urls(text: str) -> list[str]:
-    """Find Tigris public PNG URLs in streamed text so the UI can preview them."""
-
-    public_host = re.escape(os.environ.get("TIGRIS_PUBLIC_HOST", "t3.tigrisfiles.io"))
-    pattern = rf"https://[A-Za-z0-9_.-]+\.{public_host}/creatives/[A-Za-z0-9_-]+\.png"
-    return list(dict.fromkeys(re.findall(pattern, text)))
