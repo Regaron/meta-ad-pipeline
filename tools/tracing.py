@@ -687,10 +687,13 @@ class TraceSession:
                 except Exception:
                     pass
             elif verdict == "iterate":
-                # Drop the rejected render; the next render for this
-                # variant slot will populate a new pending entry under
-                # its own fresh png_url.
-                self._pending_renders.pop(critiqued_url, None)
+                # Keep the render pending. If the model caps iterations
+                # without producing another render, session close still
+                # shows this attempt. If the model does re-render, the new
+                # render joins under its own png_url and both eventually
+                # surface - better than silently losing a variant the user
+                # asked for when only one critique verdict ever fires.
+                pass
             return
 
     async def close(self, error: BaseException | None = None) -> None:
