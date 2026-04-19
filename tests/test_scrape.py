@@ -47,5 +47,6 @@ async def test_scrape_url_returns_text_block_with_adcopy_json():
     fake_client.run.assert_awaited_once()
     call_kwargs = fake_client.run.await_args.kwargs
     assert "https://acme.com" in call_kwargs["task"]
+    assert "Extract ad copy." in call_kwargs["task"]
     assert call_kwargs["output_schema"] is AdCopy
     assert call_kwargs["model"] == "claude-opus-4.6"
