@@ -1,0 +1,12 @@
+/* osopi brand accents over Chainlit shadcn tokens */
+:root {
+  --primary: oklch(0.68 0.20 30);
+  --primary-foreground: oklch(0.98 0.02 80);
+  --ring: oklch(0.68 0.20 30);
+}
+
+.dark {
+  --primary: oklch(0.72 0.18 35);
+  --primary-foreground: oklch(0.18 0.02 30);
+  --ring: oklch(0.72 0.18 35);
+}

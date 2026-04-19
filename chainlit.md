@@ -1,4 +1,4 @@
-# Meta Ad Pipeline
+# osopi. — Your ads, on autopilot.
 
 Paste a landing URL and I'll:
 
