@@ -2,8 +2,10 @@ import io
 import json
 import os
 import platform
+from pathlib import Path
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 import boto3
 import pypdfium2 as pdfium
@@ -23,6 +25,8 @@ if platform.system() == "Darwin":
     ]
     parts = [p for p in existing_library_path.split(":") if p]
     for path in reversed(extra_paths):
+        if not Path(path).exists():
+            continue
         if path not in parts:
             parts.insert(0, path)
     os.environ["DYLD_LIBRARY_PATH"] = ":".join(parts)
@@ -33,13 +37,13 @@ import weasyprint
 def _render_html_to_png_bytes(html: str) -> bytes:
     """Render HTML to a 1080x1080 PNG byte string."""
     pdf_bytes = weasyprint.HTML(string=html).write_pdf()
-    pdf = pdfium.PdfDocument(io.BytesIO(pdf_bytes))
-    page = pdf[0]
-    # WeasyPrint maps CSS px at 96 DPI; PDF's native DPI is 72.
-    # Scale = 96/72 lifts the render back up to one pixel per CSS px.
-    pil_img = page.render(scale=96 / 72).to_pil()
-    if pil_img.size != _PNG_SIZE:
-        pil_img = pil_img.resize(_PNG_SIZE, Image.LANCZOS)
+    with pdfium.PdfDocument(io.BytesIO(pdf_bytes)) as pdf:
+        page = pdf[0]
+        # WeasyPrint maps CSS px at 96 DPI; PDF's native DPI is 72.
+        # Scale = 96/72 lifts the render back up to one pixel per CSS px.
+        pil_img = page.render(scale=96 / 72).to_pil()
+        if pil_img.size != _PNG_SIZE:
+            pil_img = pil_img.resize(_PNG_SIZE, Image.LANCZOS)
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
@@ -56,14 +60,19 @@ def _s3_client():
 
 def _upload_png(png_bytes: bytes, key: str) -> str:
     bucket = os.environ["TIGRIS_BUCKET"]
-    _s3_client().put_object(
+    endpoint = os.environ["AWS_ENDPOINT_URL"]
+    s3 = _s3_client()
+    s3.put_object(
         Bucket=bucket,
         Key=key,
         Body=png_bytes,
         ACL="public-read",
         ContentType="image/png",
     )
-    return f"https://{bucket}.t3.storage.dev/{key}"
+    parsed = urlparse(endpoint)
+    scheme = parsed.scheme or "https"
+    host = parsed.netloc or parsed.path
+    return f"{scheme}://{bucket}.{host}/{key}"
 
 
 async def _render_handler(args: dict[str, Any]) -> dict[str, Any]:

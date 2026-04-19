@@ -52,6 +52,13 @@ def test_render_creative_produces_1080_png_and_uploads_to_tigris(monkeypatch):
         key = payload["png_url"].split(".t3.storage.dev/")[1]
         head = s3.head_object(Bucket="ad-pipeline-creatives", Key=key)
         assert head["ContentType"] == "image/png"
+        acl = s3.get_object_acl(Bucket="ad-pipeline-creatives", Key=key)
+        assert any(
+            grant.get("Permission") == "READ"
+            and grant.get("Grantee", {}).get("URI")
+            == "http://acs.amazonaws.com/groups/global/AllUsers"
+            for grant in acl["Grants"]
+        )
 
         # The body is a valid 1080x1080 PNG
         obj = s3.get_object(Bucket="ad-pipeline-creatives", Key=key)
