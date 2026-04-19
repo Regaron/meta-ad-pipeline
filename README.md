@@ -69,10 +69,23 @@ Then try prompts like:
 - `tools/creative.py` — HTML → PDF → PNG pipeline via WeasyPrint +
   pypdfium2, uploaded to Tigris via boto3.
 
-## Observability
+## Observability & Evaluation
 
-See [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for the trace shape,
-filtering recipes, and a 60-second mentor walkthrough. Headline:
+- [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) — trace shape, filters,
+  L5 alert config, mentor walkthrough.
+- [`docs/EVALUATION.md`](docs/EVALUATION.md) — eval runner, dataset
+  schema, CI wiring.
+
+Quick verification once keys are in `.env`:
+
+```bash
+uv run python scripts/verify_langfuse.py       # confirms Langfuse prices Claude
+uv run python scripts/seed_eval_dataset.py     # seeds the golden set
+uv run python -m tools.eval --dry-run          # smoke the scorer
+uv run python scripts/run_pipeline_headless.py --url https://acme.example.com
+```
+
+Headline from the observability doc:
 
 - One Langfuse trace per Chainlit turn, `session_id` grouping every turn
   in a conversation.

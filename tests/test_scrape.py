@@ -69,3 +69,46 @@ async def test_scrape_url_returns_text_block_with_brand_research_json():
     assert "Focus on the B2B decision maker." in call_kwargs["task"]
     assert call_kwargs["output_schema"] is BrandResearch
     assert call_kwargs["model"] == "claude-opus-4.6"
+
+
+@pytest.mark.asyncio
+async def test_scrape_url_second_call_hits_cache_and_skips_browser_use():
+    from tools.scrape import _scrape_handler, reset_scrape_cache
+
+    reset_scrape_cache()
+    fake_result = AsyncMock()
+    fake_result.output = _CANNED_RESEARCH
+
+    fake_client = AsyncMock()
+    fake_client.run = AsyncMock(return_value=fake_result)
+
+    args = {"url": "https://acme.com", "extraction_goal": "B2B focus."}
+
+    with patch("tools.scrape.AsyncBrowserUse", return_value=fake_client):
+        first = await _scrape_handler(args)
+        second = await _scrape_handler(args)
+
+    assert first == second
+    # Second call must NOT drive Browser Use again.
+    assert fake_client.run.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_scrape_url_cache_can_be_disabled(monkeypatch):
+    from tools.scrape import _scrape_handler, reset_scrape_cache
+
+    reset_scrape_cache()
+    monkeypatch.setenv("AD_PIPELINE_DISABLE_SCRAPE_CACHE", "1")
+
+    fake_result = AsyncMock()
+    fake_result.output = _CANNED_RESEARCH
+
+    fake_client = AsyncMock()
+    fake_client.run = AsyncMock(return_value=fake_result)
+
+    args = {"url": "https://acme.com", "extraction_goal": "B2B."}
+    with patch("tools.scrape.AsyncBrowserUse", return_value=fake_client):
+        await _scrape_handler(args)
+        await _scrape_handler(args)
+
+    assert fake_client.run.await_count == 2
