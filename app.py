@@ -6,11 +6,9 @@ import chainlit as cl
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
-    PermissionResultAllow,
     ResultMessage,
     SystemMessage,
     TextBlock,
-    ToolPermissionContext,
     query,
 )
 from dotenv import load_dotenv
@@ -30,17 +28,6 @@ MODEL = "claude-sonnet-4-6"
 _SDK_SESSION_KEY = "sdk_session_id"
 
 
-async def _allow_all_tools(
-    tool_name: str,
-    tool_input: dict,
-    context: ToolPermissionContext,
-) -> PermissionResultAllow:
-    """Blanket approve every tool call. Chainlit has no interactive approval
-    UI, so the coordinator and all subagents must run fully permissive."""
-    del tool_name, tool_input, context
-    return PermissionResultAllow()
-
-
 def build_options(resume_session_id: str | None) -> ClaudeAgentOptions:
     pipeboard_token = os.environ["PIPEBOARD_OAUTH_TOKEN"]
     return ClaudeAgentOptions(
@@ -55,11 +42,11 @@ def build_options(resume_session_id: str | None) -> ClaudeAgentOptions:
             RENDER_CREATIVE_TOOL,
             VIEW_BRAND_REFERENCE_TOOL,
         ],
-        # Chainlit has no interactive approval UI. Bypass plus an allow-all
-        # callback guarantees every MCP tool call - for the coordinator and
-        # every subagent - is auto-approved.
+        # Chainlit has no interactive approval UI, and the SDK's
+        # can_use_tool callback requires streaming mode (we pass a string
+        # prompt). permission_mode=bypassPermissions auto-approves every
+        # MCP call without the callback requirement.
         permission_mode="bypassPermissions",
-        can_use_tool=_allow_all_tools,
         agents=build_agents(),
         mcp_servers={
             "adpipeline": adpipeline_server,
