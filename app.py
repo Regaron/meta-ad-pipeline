@@ -88,6 +88,32 @@ def build_options(resume_session_id: str | None) -> ClaudeAgentOptions:
     )
 
 
+@cl.set_starters
+async def set_starters() -> list[cl.Starter]:
+    return [
+        cl.Starter(
+            label="Build a Meta ad",
+            message="Build a Meta ad for https://",
+            icon="/public/logo_dark.png",
+        ),
+        cl.Starter(
+            label="Creative bake-off",
+            message="Creative bake-off for https://, $25/day",
+            icon="/public/logo_dark.png",
+        ),
+        cl.Starter(
+            label="Check a campaign",
+            message="How is campaign  doing so far?",
+            icon="/public/logo_dark.png",
+        ),
+        cl.Starter(
+            label="Go live",
+            message="Go live on campaign ",
+            icon="/public/logo_dark.png",
+        ),
+    ]
+
+
 @cl.on_chat_start
 async def on_chat_start() -> None:
     cl.user_session.set(_SDK_SESSION_KEY, None)
