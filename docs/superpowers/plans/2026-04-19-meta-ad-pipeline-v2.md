@@ -867,12 +867,14 @@ git commit -m "feat(mcp): register view_brand_reference + bump server version"
 
 ---
 
-## Task 7: Add `agents.py` (coordinator prompt + 2 AgentDefinitions)
+## Task 7: Replace `agents.py` with the v2 prompts (coordinator + 2 AgentDefinitions)
 
 **Files:**
-- Create: `agents.py`
+- Modify: `agents.py` (file already exists from v1 plan task 7; v2 fully replaces its contents)
 
-- [ ] **Step 1: Create `agents.py`**
+- [ ] **Step 1: Replace the entire contents of `agents.py`**
+
+The current file has v1's `AdCopy`-shaped prompts and a single-tool creative-director. Replace it wholesale with:
 
 ```python
 """Coordinator system prompt and AgentDefinitions for the meta-ad-pipeline.
@@ -1072,12 +1074,14 @@ git commit -m "feat(agents): add coordinator prompt + creative-director + media-
 
 ---
 
-## Task 8: Add `tests/test_agents_smoke.py` (structural prompt assertions)
+## Task 8: Replace `tests/test_agents_smoke.py` with the v2 assertions
 
 **Files:**
-- Create: `tests/test_agents_smoke.py`
+- Modify: `tests/test_agents_smoke.py` (file already exists from v1 plan task 8; v2 fully replaces its contents)
 
-- [ ] **Step 1: Create the test file**
+- [ ] **Step 1: Replace the entire contents of the test file**
+
+The v1 file asserts `cd.tools == [RENDER_CREATIVE_TOOL]` (single tool) and only checks for `PAUSED` in the coordinator prompt. v2 needs the new assertions per spec §10. Replace wholesale with:
 
 ```python
 """Structural assertions on the agent prompts and tool wiring.
